@@ -84,11 +84,10 @@ namespace VocalPure.Services
                 IntraOpNumThreads = _settings.IntraOpNumThreads
             };
 
-            // Try execution providers in priority order
-            Exception? lastException = null;
+            // FIX: Explicitly specify new Action<SessionOptions> to help the compiler infer tuple types
             var providerPriority = new List<(string Name, Action<SessionOptions> Configure)>
             {
-                ("DirectML", opts =>
+                ("DirectML", new Action<SessionOptions>(opts =>
                 {
                     try
                     {
@@ -99,8 +98,8 @@ namespace VocalPure.Services
                     {
                         throw new InvalidOperationException("DirectML provider failed to initialize", ex);
                     }
-                }),
-                ("OpenVINO", opts =>
+                })),
+                ("OpenVINO", new Action<SessionOptions>(opts =>
                 {
                     try
                     {
@@ -119,12 +118,12 @@ namespace VocalPure.Services
                     {
                         throw new InvalidOperationException("OpenVINO provider failed to initialize", ex);
                     }
-                }),
-                ("CPU", opts =>
+                })),
+                ("CPU", new Action<SessionOptions>(opts =>
                 {
                     // CPU is the default fallback - no configuration needed
                     // ORT will automatically use CPU if no GPU EP is appended
-                })
+                }))
             };
 
             foreach (var (providerName, configure) in providerPriority)
@@ -168,11 +167,6 @@ namespace VocalPure.Services
         /// Performs vocal separation on an audio file using the MDX-Net ONNX model.
         /// Processes audio in chunks to prevent OutOfMemoryException.
         /// </summary>
-        /// <param name="inputWavPath">Input Float32 PCM WAV file path.</param>
-        /// <param name="outputVocalsPath">Output vocals WAV file path.</param>
-        /// <param name="modelPath">ONNX model file path.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
-        /// <param name="progress">Progress reporter with chunk info.</param>
         public async Task SeparateVocalsAsync(
             string inputWavPath,
             string outputVocalsPath,
