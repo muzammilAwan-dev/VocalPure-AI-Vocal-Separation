@@ -45,13 +45,13 @@ namespace VocalPure.Services
                 "-hide_banner",             // Suppress banner
                 "-loglevel", "error",       // Only show errors
                 "-stats",                   // Show progress stats
-                "-i", $@"""{inputPath}"""",   // Input file
+                "-i", $"\"{inputPath}\"",   // Input file
                 "-vn",                      // No video
                 "-acodec", "pcm_f32le",     // Float32 PCM
                 "-ar", "44100",             // 44.1kHz sample rate
                 "-ac", "2",                 // Stereo
                 "-f", "wav",                // WAV format
-                $@"""{outputWavPath}""""
+                $"\"{outputWavPath}\""
             };
 
             await RunFfmpegAsync(ffmpegPath, arguments, cancellationToken, progress, ParseConvertProgress);
@@ -77,14 +77,14 @@ namespace VocalPure.Services
                 "-hide_banner",
                 "-loglevel", "error",
                 "-stats",
-                "-i", $@"""{inputWavPath}"""",
+                "-i", $"\"{inputWavPath}\"",
                 "-codec:a", "libmp3lame",
                 "-b:a", $"{bitrateKbps}k",
                 "-q:a", "0",
                 "-map_metadata", "-1",
                 "-id3v2_version", "3",
                 "-write_id3v1", "1",
-                $@"""{outputMp3Path}"""
+                $"\"{outputMp3Path}\""
             };
 
             await RunFfmpegAsync(ffmpegPath, arguments, cancellationToken, progress, ParseConvertProgress);
@@ -130,12 +130,12 @@ namespace VocalPure.Services
                 "-hide_banner",
                 "-loglevel", "error",
                 "-stats",
-                "-i", $@"""{inputWavPath}"""",
+                "-i", $"\"{inputWavPath}\"",
                 "-acodec", "pcm_f32le",
                 "-ar", "44100",
                 "-ac", "2",
                 "-f", "wav",
-                $@"""{outputWavPath}"""
+                $"\"{outputWavPath}\""
             };
 
             await RunFfmpegAsync(ffmpegPath, arguments, cancellationToken, progress, ParseConvertProgress);
@@ -166,8 +166,8 @@ namespace VocalPure.Services
                 "-hide_banner",
                 "-loglevel", "error",
                 "-stats",
-                "-i", $@"""{originalVideoPath}"""",   // Input 0: original video
-                "-i", $@"""{newAudioPath}"""",       // Input 1: new audio
+                "-i", $"\"{originalVideoPath}\"",   // Input 0: original video
+                "-i", $"\"{newAudioPath}\"",       // Input 1: new audio
                 "-c:v", "copy",                     // Copy video without re-encoding
                 "-c:a", "aac",                      // AAC audio for compatibility
                 "-b:a", "320k",
@@ -177,7 +177,7 @@ namespace VocalPure.Services
                 "-movflags", "+faststart",          // Web optimization
                 "-fflags", "+genpts",               // Generate presentation timestamps
                 "-async", "1",                      // Audio sync
-                $@"""{outputPath}"""
+                $"\"{outputPath}\""
             };
 
             await RunFfmpegAsync(ffmpegPath, arguments, cancellationToken, progress, ParseConvertProgress);
