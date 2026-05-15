@@ -23,15 +23,10 @@
     <AssemblyVersion>1.0.0</AssemblyVersion>
     <FileVersion>1.0.0</FileVersion>
     <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
-    
-    <TrimMode>partial</TrimMode>
-    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <Optimize>true</Optimize>
-    <PublishTrimmed>true</PublishTrimmed>
-    <TrimUnusedDependencies>true</TrimUnusedDependencies>
     <InvariantGlobalization>false</InvariantGlobalization>
     <StackTraceSupport>false</StackTraceSupport>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
