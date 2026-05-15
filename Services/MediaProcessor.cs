@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -279,7 +280,9 @@ namespace VocalPure.Services
                 KillActiveProcess();
             }))
             {
-                string errorBuffer = "";
+                // FIX: Use thread-safe StringBuilder for high-frequency async logging
+                var errorBuffer = new StringBuilder();
+                var lockObj = new object();
                 double lastProgress = 0;
 
                 _activeProcess.ErrorDataReceived += (_, e) =>
@@ -287,10 +290,12 @@ namespace VocalPure.Services
                     if (string.IsNullOrWhiteSpace(e.Data))
                         return;
 
-                    errorBuffer += e.Data + "\n";
+                    lock (lockObj)
+                    {
+                        errorBuffer.AppendLine(e.Data);
+                    }
 
                     // Parse progress from FFmpeg stderr output
-                    // Format: "size=   256kB time=00:00:05.23 bitrate= 400.2kbits/s speed=12x"
                     if (progress != null)
                     {
                         double parsedProgress = progressParser(e.Data, lastProgress);
@@ -318,9 +323,13 @@ namespace VocalPure.Services
                 // Check exit code
                 if (_activeProcess.ExitCode != 0)
                 {
-                    string errorMessage = errorBuffer.Length > 500
-                        ? errorBuffer.Substring(errorBuffer.Length - 500)
-                        : errorBuffer;
+                    string errorMessage;
+                    lock (lockObj)
+                    {
+                        errorMessage = errorBuffer.Length > 500
+                            ? errorBuffer.ToString(errorBuffer.Length - 500, 500)
+                            : errorBuffer.ToString();
+                    }
                     throw new InvalidOperationException(
                         $"FFmpeg exited with code {_activeProcess.ExitCode}. Error: {errorMessage}");
                 }
@@ -335,30 +344,21 @@ namespace VocalPure.Services
         /// </summary>
         private static double ParseConvertProgress(string line, double currentProgress)
         {
-            // Try to extract time from FFmpeg progress output
-            // "size=   256kB time=00:00:05.23 bitrate= 400.2kbits/s speed=12x"
             var timeMatch = Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}\.\d+)");
             if (timeMatch.Success)
             {
-                // We can't calculate percentage without total duration
-                // Return a pseudo-progress based on time (will be refined by caller)
                 double hours = double.Parse(timeMatch.Groups[1].Value);
                 double minutes = double.Parse(timeMatch.Groups[2].Value);
                 double seconds = double.Parse(timeMatch.Groups[3].Value);
                 double totalSeconds = hours * 3600 + minutes * 60 + seconds;
 
-                // Return incremental progress - caller should scale this
-                // We use a heuristic: assume ~5 minutes max for most files
                 const double assumedMaxDuration = 300; // 5 minutes
                 return Math.Min(totalSeconds / assumedMaxDuration, 0.99);
             }
 
-            // Parse "out_time_ms" or frame-based progress if available
             var frameMatch = Regex.Match(line, @"frame=\s*(\d+)");
             if (frameMatch.Success)
             {
-                // Frame-based progress is tricky without total frames
-                // Return small increments to show activity
                 return currentProgress + 0.001;
             }
 
@@ -367,11 +367,8 @@ namespace VocalPure.Services
 
         private string GetFfmpegPath()
         {
-            // Check engine directory first
             if (File.Exists(_dependencyManager.FFmpegPath))
                 return _dependencyManager.FFmpegPath;
-
-            // Fallback to PATH
             return "ffmpeg.exe";
         }
 
@@ -382,10 +379,7 @@ namespace VocalPure.Services
                 _activeProcess?.Kill();
                 _activeProcess?.WaitForExit(5000);
             }
-            catch
-            {
-                // Best effort kill
-            }
+            catch { }
         }
 
         private static void TryKillProcess(Process process)
@@ -398,10 +392,7 @@ namespace VocalPure.Services
                     process.WaitForExit(3000);
                 }
             }
-            catch
-            {
-                // Process may already be dead
-            }
+            catch { }
         }
 
         private void EnsureNotDisposed()
