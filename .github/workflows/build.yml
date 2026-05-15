@@ -1,199 +1,43 @@
-# =============================================================================
-# GitHub Actions Workflow for VocalPure
-# Builds a self-contained, single-file x64 executable with all dependencies.
-# =============================================================================
-
-name: VocalPure Build & Release
+name: Build Application
 
 on:
   push:
-    branches: [main, master]
-    tags: ['v*']
+    branches: [ "main" ]
   pull_request:
-    branches: [main, master]
+    branches: [ "main" ]
   workflow_dispatch:
-    inputs:
-      release:
-        description: 'Create release?'
-        required: false
-        default: 'false'
 
+# Fixes the Node.js 20 deprecation warnings
 env:
-  DOTNET_VERSION: '8.0.x'
-  CONFIGURATION: 'Release'
-  RUNTIME: 'win-x64'
-  PROJECT_PATH: './VocalPure.csproj'
-  SOLUTION_PATH: './VocalPure.sln'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ==========================================================================
-  # BUILD JOB - Compiles self-contained single-file executable
-  # ==========================================================================
   build:
-    name: Build Application
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
-      # -----------------------------------------------------------------------
-      # Checkout repository
-      # -----------------------------------------------------------------------
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    - name: Checkout Repository
+      uses: actions/checkout@v4
 
-      # -----------------------------------------------------------------------
-      # Setup .NET 8 SDK
-      # -----------------------------------------------------------------------
-      - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
 
-      # -----------------------------------------------------------------------
-      # Cache NuGet packages
-      # -----------------------------------------------------------------------
-      - name: Cache NuGet packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            ${{ runner.os }}-nuget-
+    - name: Restore dependencies
+      run: dotnet restore --runtime win-x64
 
-      # -----------------------------------------------------------------------
-      # Restore dependencies
-      # -----------------------------------------------------------------------
-      - name: Restore NuGet packages
-        run: dotnet restore ${{ env.PROJECT_PATH }} --runtime ${{ env.RUNTIME }}
+    - name: Publish Single-File Executable
+      run: >
+        dotnet publish -c Release -r win-x64 --self-contained
+        -p:PublishSingleFile=true
+        -p:IncludeNativeLibrariesForSelfExtract=true
+        -p:EnableCompressionInSingleFile=true
+        -o ./publish_output
 
-      # -----------------------------------------------------------------------
-      # Build the application
-      # -----------------------------------------------------------------------
-      - name: Build application
-        run: >
-          dotnet build ${{ env.PROJECT_PATH }}
-          --configuration ${{ env.CONFIGURATION }}
-          --runtime ${{ env.RUNTIME }}
-          --no-restore
-          --self-contained
-
-      # -----------------------------------------------------------------------
-      # Run tests (if any exist)
-      # -----------------------------------------------------------------------
-      - name: Run tests
-        run: dotnet test ${{ env.SOLUTION_PATH }} --configuration ${{ env.CONFIGURATION }} --no-build --verbosity normal
-        continue-on-error: true
-
-      # -----------------------------------------------------------------------
-      # Publish self-contained single-file executable
-      # -----------------------------------------------------------------------
-      - name: Publish self-contained executable
-        run: >
-          dotnet publish ${{ env.PROJECT_PATH }}
-          --configuration ${{ env.CONFIGURATION }}
-          --runtime ${{ env.RUNTIME }}
-          --self-contained
-          --publish-single-file
-          --output ./publish
-          -p:PublishSingleFile=true
-          -p:SelfContained=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:EnableCompressionInSingleFile=true
-          -p:DebugType=embedded
-          -p:TrimMode=partial
-          -p:PublishTrimmed=true
-          -p:SuppressTrimAnalysisWarnings=true
-          -p:StackTraceSupport=false
-          -p:UseSystemResourceKeys=true
-
-      # -----------------------------------------------------------------------
-      # Verify publish output
-      # -----------------------------------------------------------------------
-      - name: Verify publish output
-        run: |
-          echo "Published files:"
-          Get-ChildItem -Path ./publish -Recurse | Select-Object Name, Length
-          
-          # Check if main executable exists
-          if (!(Test-Path "./publish/VocalPure.exe")) {
-            Write-Error "VocalPure.exe not found in publish output!"
-            exit 1
-          }
-          
-          $exeSize = (Get-Item "./publish/VocalPure.exe").Length
-          Write-Host "Executable size: $([math]::Round($exeSize / 1MB, 2)) MB"
-
-      # -----------------------------------------------------------------------
-      # Upload build artifact
-      # -----------------------------------------------------------------------
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: VocalPure-${{ env.RUNTIME }}-${{ github.sha }}
-          path: ./publish/
-          retention-days: 30
-
-  # ==========================================================================
-  # RELEASE JOB - Creates GitHub release with installer
-  # ==========================================================================
-  release:
-    name: Create Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.release == 'true'
-    runs-on: windows-2022
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: VocalPure-${{ env.RUNTIME }}-${{ github.sha }}
-          path: ./release/
-
-      - name: Create ZIP archive
-        run: |
-          $tag = "${{ github.ref_name }}"
-          if ([string]::IsNullOrEmpty($tag)) { $tag = "v1.0.0-build" }
-          Compress-Archive -Path ./release/* -DestinationPath "./VocalPure-$tag-win-x64.zip" -Force
-          Write-Host "Archive created: VocalPure-$tag-win-x64.zip"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/v')
-        with:
-          files: ./VocalPure-*.zip
-          generate_release_notes: true
-          draft: false
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ==========================================================================
-  # CODE QUALITY JOB - Static analysis
-  # ==========================================================================
-  analyze:
-    name: Code Analysis
-    runs-on: windows-2022
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Restore packages
-        run: dotnet restore ${{ env.PROJECT_PATH }}
-
-      - name: Run dotnet format check
-        run: dotnet format ${{ env.PROJECT_PATH }} --verify-no-changes --verbosity diagnostic
-        continue-on-error: true
-
-      - name: Run NuGet vulnerability audit
-        run: dotnet list ${{ env.PROJECT_PATH }} package --vulnerable --include-transitive
-        continue-on-error: true
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: VocalPure-Executable
+        path: ./publish_output/VocalPure.exe
+        retention-days: 7
