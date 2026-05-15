@@ -7,7 +7,6 @@ using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using VocalPure.Models;
-using VocalPure.Services;
 
 namespace VocalPure.Services
 {
@@ -84,7 +83,10 @@ namespace VocalPure.Services
                 IntraOpNumThreads = _settings.IntraOpNumThreads
             };
 
-            // FIX: Explicitly specify new Action<SessionOptions> to help the compiler infer tuple types
+            // FIX 1: Add back the missing lastException declaration
+            Exception? lastException = null;
+
+            // FIX 2: Explicitly specify Action types to help the compiler
             var providerPriority = new List<(string Name, Action<SessionOptions> Configure)>
             {
                 ("DirectML", new Action<SessionOptions>(opts =>
@@ -103,16 +105,8 @@ namespace VocalPure.Services
                 {
                     try
                     {
-                        // OpenVINO for Intel GPUs/VPUs
-                        var ovOptions = new Dictionary<string, string>
-                        {
-                            { "device_id", "GPU" },
-                            { "device_type", "GPU.0" },
-                            { "precision", "FP16" },
-                            { "cache_dir", "" },
-                            { "num_of_threads", _settings.IntraOpNumThreads.ToString() }
-                        };
-                        opts.AppendExecutionProvider_OpenVINO(ovOptions);
+                        // FIX 3: ORT 1.16.3 C# API uses a string device identifier, not a dictionary
+                        opts.AppendExecutionProvider_OpenVINO("GPU_FP16");
                     }
                     catch (Exception ex)
                     {
@@ -122,7 +116,6 @@ namespace VocalPure.Services
                 ("CPU", new Action<SessionOptions>(opts =>
                 {
                     // CPU is the default fallback - no configuration needed
-                    // ORT will automatically use CPU if no GPU EP is appended
                 }))
             };
 
