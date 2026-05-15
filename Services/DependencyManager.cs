@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
+using Serilog;
 
 namespace VocalPure.Services
 {
@@ -50,6 +51,8 @@ namespace VocalPure.Services
 
             try
             {
+                Log.Information("DependencyManager: Initializing engine at {EngineDir}", _engineDirectory);
+                
                 // Ensure engine directory exists
                 Directory.CreateDirectory(_engineDirectory);
 
@@ -59,13 +62,16 @@ namespace VocalPure.Services
                 // Copy and verify ONNX model
                 await DeployModelAsync("Kim_Vocal_2.onnx", ModelPath);
 
+                Log.Information("DependencyManager: Stripping Mark of the Web from engine binaries.");
                 // Strip MotW from all files in engine directory
                 await Task.Run(() => MotWStripper.StripMotWInDirectory(_engineDirectory));
 
                 _isInitialized = true;
+                Log.Information("DependencyManager: Initialization completed successfully.");
             }
             catch (Exception ex)
             {
+                Log.Error(ex, "DependencyManager: Failed to initialize VocalPure engine.");
                 throw new InvalidOperationException(
                     $"Failed to initialize VocalPure engine at {_engineDirectory}: {ex.Message}", ex);
             }
@@ -76,7 +82,10 @@ namespace VocalPure.Services
         /// </summary>
         public bool VerifyDependencies()
         {
-            return File.Exists(FFmpegPath) && File.Exists(ModelPath);
+            bool hasFfmpeg = File.Exists(FFmpegPath);
+            bool hasModel = File.Exists(ModelPath);
+            Log.Debug("Dependency verification: FFmpeg={HasFfmpeg}, Model={HasModel}", hasFfmpeg, hasModel);
+            return hasFfmpeg && hasModel;
         }
 
         /// <summary>
@@ -84,6 +93,8 @@ namespace VocalPure.Services
         /// </summary>
         private async Task DeployBinaryAsync(string fileName, string destinationPath)
         {
+            Log.Debug("Deploying binary {FileName}...", fileName);
+            
             // Check if already exists and is valid
             if (File.Exists(destinationPath))
             {
@@ -97,6 +108,7 @@ namespace VocalPure.Services
                     if (srcInfo.LastWriteTimeUtc > destInfo.LastWriteTimeUtc ||
                         srcInfo.Length != destInfo.Length)
                     {
+                        Log.Information("Updating {FileName} as bundled version is newer.", fileName);
                         await CopyFileWithRetryAsync(sourcePath, destinationPath);
                     }
                 }
@@ -108,6 +120,7 @@ namespace VocalPure.Services
             string bundledPath = Path.Combine(_appDirectory, fileName);
             if (File.Exists(bundledPath))
             {
+                Log.Information("Copying {FileName} from application directory.", fileName);
                 await CopyFileWithRetryAsync(bundledPath, destinationPath);
                 return;
             }
@@ -116,6 +129,7 @@ namespace VocalPure.Services
             string engineBundledPath = Path.Combine(_appDirectory, "Engine", fileName);
             if (File.Exists(engineBundledPath))
             {
+                Log.Information("Copying {FileName} from Engine subdirectory.", fileName);
                 await CopyFileWithRetryAsync(engineBundledPath, destinationPath);
                 return;
             }
@@ -127,11 +141,13 @@ namespace VocalPure.Services
                 var foundFiles = Directory.GetFiles(tempPath, fileName, SearchOption.AllDirectories);
                 if (foundFiles.Length > 0)
                 {
+                    Log.Information("Copying {FileName} from temporary extraction directory.", fileName);
                     await CopyFileWithRetryAsync(foundFiles[0], destinationPath);
                     return;
                 }
             }
 
+            Log.Error("Required binary {FileName} not found anywhere.", fileName);
             throw new FileNotFoundException(
                 $"Required binary not found: {fileName}. Please ensure the engine components are properly installed.");
         }
@@ -141,13 +157,17 @@ namespace VocalPure.Services
         /// </summary>
         private async Task DeployModelAsync(string fileName, string destinationPath)
         {
+            Log.Debug("Deploying model {FileName}...", fileName);
+            
             // Check if model already exists
             if (File.Exists(destinationPath))
             {
-                // Verify it's a valid ONNX file (at least check header)
+                // Verify it's a valid ONNX file
                 bool isValid = await Task.Run(() => ValidateOnnxFile(destinationPath));
                 if (isValid)
                 {
+                    Log.Debug("Existing model {FileName} is valid.", fileName);
+                    
                     // Check if there's a newer version bundled
                     string sourcePath = Path.Combine(_appDirectory, "Engine", fileName);
                     if (File.Exists(sourcePath))
@@ -157,11 +177,14 @@ namespace VocalPure.Services
                         if (srcInfo.LastWriteTimeUtc > destInfo.LastWriteTimeUtc ||
                             srcInfo.Length != destInfo.Length)
                         {
+                            Log.Information("Updating model {FileName} from {SourcePath}", fileName, sourcePath);
                             await CopyFileWithRetryAsync(sourcePath, destinationPath);
                         }
                     }
                     return;
                 }
+                
+                Log.Warning("Existing model {FileName} is invalid or corrupted. Attempting to redeploy.", fileName);
             }
 
             // Try to find the model file
@@ -176,6 +199,7 @@ namespace VocalPure.Services
             {
                 if (File.Exists(searchPath))
                 {
+                    Log.Information("Copying model {FileName} from {SourcePath}", fileName, searchPath);
                     await CopyFileWithRetryAsync(searchPath, destinationPath);
                     return;
                 }
@@ -192,6 +216,7 @@ namespace VocalPure.Services
                         var foundFiles = Directory.GetFiles(rootDir, fileName, SearchOption.AllDirectories);
                         if (foundFiles.Length > 0)
                         {
+                            Log.Information("Copying model {FileName} from temp directory {SourcePath}", fileName, foundFiles[0]);
                             await CopyFileWithRetryAsync(foundFiles[0], destinationPath);
                             return;
                         }
@@ -203,6 +228,7 @@ namespace VocalPure.Services
                 }
             }
 
+            Log.Error("ONNX model {FileName} not found.", fileName);
             throw new FileNotFoundException(
                 $"ONNX model not found: {fileName}. Please download the Kim_Vocal_2.onnx model and place it in the Engine folder.");
         }
@@ -226,11 +252,13 @@ namespace VocalPure.Services
 
                     // Strip MotW immediately after copy
                     MotWStripper.StripMotW(destination);
+                    Log.Debug("Successfully copied to {Destination}", destination);
 
                     return;
                 }
                 catch (IOException) when (attempt < maxRetries - 1)
                 {
+                    Log.Warning("File lock when copying to {Destination}, retrying...", destination);
                     await Task.Delay(500 * (attempt + 1));
                 }
             }
@@ -239,29 +267,27 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Validates that a file is a proper ONNX model by checking its magic bytes.
+        /// Validates that the file exists and is reasonably sized for an ONNX model.
+        /// Fixed: Relaxed the strict Protocol Buffer checks to allow raw downloads.
         /// </summary>
         private static bool ValidateOnnxFile(string path)
         {
             try
             {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                byte[] header = new byte[8];
-                int read = fs.Read(header, 0, 8);
-                if (read < 8) return false;
-
-                // ONNX files start with 0x08 (protobuf wire type) followed by "ONNX"
-                return header[0] == 0x08 &&
-                       header[1] == 0x00 &&
-                       header[2] == 0x00 &&
-                       header[3] == 0x00 &&
-                       header[4] == 0x00 &&
-                       header[5] == 0x00 &&
-                       header[6] == 0x00 &&
-                       header[7] == 0x00;
+                var info = new FileInfo(path);
+                // Ensure file exists and is larger than 10MB (Kim_Vocal_2 is ~65MB)
+                bool isValid = info.Exists && info.Length > 10 * 1024 * 1024;
+                
+                if (!isValid) 
+                {
+                    Log.Warning("Model validation failed. File '{Path}' is missing or too small ({Size} bytes).", path, info.Length);
+                }
+                
+                return isValid;
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Error(ex, "Exception during model validation for {Path}", path);
                 return false;
             }
         }
