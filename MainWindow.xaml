@@ -411,10 +411,10 @@
                             </Style>
                         </Ellipse.Style>
                     </Ellipse>
-                    <TextBlock Style="{StaticResource MutedText}"
-                               VerticalAlignment="Center">
+                    
+                    <TextBlock VerticalAlignment="Center">
                         <TextBlock.Style>
-                            <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+                            <Style TargetType="TextBlock" BasedOn="{StaticResource MutedText}">
                                 <Setter Property="Text" Value="Idle"/>
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsProcessing}" Value="True">
