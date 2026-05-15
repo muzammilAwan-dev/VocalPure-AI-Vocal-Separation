@@ -20,7 +20,6 @@
     </Window.DataContext>
 
     <Window.Resources>
-        <!-- DataTemplate for Job Queue Items -->
         <DataTemplate x:Key="JobItemTemplate" DataType="{x:Type models:SeparationJob}">
             <Grid>
                 <Grid.RowDefinitions>
@@ -33,7 +32,6 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <!-- File Name & Size -->
                 <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Margin="0,0,0,4">
                     <TextBlock Text="{Binding FileName}"
                                FontWeight="SemiBold"
@@ -47,7 +45,6 @@
                                Style="{StaticResource MutedText}"/>
                 </StackPanel>
 
-                <!-- Status Badge -->
                 <Border Grid.Row="0" Grid.Column="1"
                         Background="{Binding Phase, Converter={StaticResource PhaseToBrush}}"
                         CornerRadius="3"
@@ -59,7 +56,6 @@
                                Foreground="White"/>
                 </Border>
 
-                <!-- Progress Bar -->
                 <Grid Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,4">
                     <ProgressBar Value="{Binding OverallProgress, Mode=OneWay}"
                                  Maximum="1"
@@ -68,7 +64,6 @@
                                  Visibility="{Binding IsActive, Converter={StaticResource BoolToVis}}"/>
                 </Grid>
 
-                <!-- Output Path & Open Button -->
                 <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
                             Orientation="Horizontal"
                             Visibility="{Binding OutputFilePath, Converter={StaticResource BoolToVis}}">
@@ -89,22 +84,15 @@
         </DataTemplate>
     </Window.Resources>
 
-    <!-- Main Layout -->
     <Grid Background="{StaticResource BackgroundPrimary}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <!-- Title Bar -->
             <RowDefinition Height="Auto" />
-            <!-- Drop Zone -->
             <RowDefinition Height="Auto" />
-            <!-- Progress Panel -->
             <RowDefinition Height="*" />
-            <!-- Queue & Log -->
             <RowDefinition Height="Auto" />
-            <!-- Status Bar -->
-        </Grid.RowDefinitions>
+            </Grid.RowDefinitions>
 
-        <!-- ====== TITLE BAR ====== -->
         <Border Grid.Row="0"
                 Background="{StaticResource BackgroundSecondary}"
                 BorderBrush="{StaticResource BorderPrimary}"
@@ -117,7 +105,6 @@
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
 
-                <!-- App Title -->
                 <StackPanel Grid.Column="0" Orientation="Horizontal">
                     <TextBlock Text="Vocal"
                                FontSize="20"
@@ -134,12 +121,10 @@
                                Margin="8,0,0,2"/>
                 </StackPanel>
 
-                <!-- Center: GPU Status -->
                 <StackPanel Grid.Column="1"
                             Orientation="Horizontal"
                             HorizontalAlignment="Center">
                     <Ellipse Width="8" Height="8"
-                             Fill="{Binding GpuAvailable, Converter={StaticResource BoolToVis}}"
                              Visibility="{Binding GpuAvailable, Converter={StaticResource BoolToVis}}">
                         <Ellipse.Fill>
                             <SolidColorBrush Color="#4CAF50"/>
@@ -152,7 +137,6 @@
                                Visibility="{Binding GpuAvailable, Converter={StaticResource BoolToVis}}"/>
                 </StackPanel>
 
-                <!-- Version -->
                 <TextBlock Grid.Column="2"
                            Text="{Binding VersionInfo}"
                            Style="{StaticResource MutedText}"
@@ -160,7 +144,6 @@
             </Grid>
         </Border>
 
-        <!-- ====== DROP ZONE ====== -->
         <Border Grid.Row="1"
                 x:Name="DropZoneBorder"
                 Background="{StaticResource DropZoneBackground}"
@@ -177,7 +160,6 @@
             <Grid>
                 <StackPanel HorizontalAlignment="Center"
                             VerticalAlignment="Center">
-                    <!-- Icon -->
                     <Viewbox Width="48" Height="48" Margin="0,0,0,12">
                         <Canvas Width="24" Height="24">
                             <Path Fill="{StaticResource AccentPrimary}"
@@ -211,7 +193,6 @@
                 </StackPanel>
             </Grid>
 
-            <!-- Trigger drag-over visual state -->
             <Border.Style>
                 <Style TargetType="Border">
                     <Style.Triggers>
@@ -224,7 +205,6 @@
             </Border.Style>
         </Border>
 
-        <!-- ====== ACTIVE PROGRESS PANEL ====== -->
         <Border Grid.Row="2"
                 Background="{StaticResource BackgroundSecondary}"
                 BorderBrush="{StaticResource BorderPrimary}"
@@ -241,7 +221,6 @@
                     <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <!-- Current File & Phase -->
                 <Grid Grid.Row="0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
@@ -258,7 +237,6 @@
                                    Margin="0,2,0,0"/>
                     </StackPanel>
 
-                    <!-- Execution Provider Badge -->
                     <Border Grid.Column="1"
                             Background="{StaticResource BackgroundElevated}"
                             BorderBrush="{StaticResource BorderPrimary}"
@@ -274,7 +252,6 @@
                     </Border>
                 </Grid>
 
-                <!-- Main Progress Bar -->
                 <Grid Grid.Row="1" Margin="0,12,0,0">
                     <ProgressBar Value="{Binding ActiveJob.OverallProgress, Mode=OneWay}"
                                  Maximum="1"
@@ -282,7 +259,6 @@
                                  Style="{StaticResource ModernProgressBar}"/>
                 </Grid>
 
-                <!-- Progress Details Row -->
                 <Grid Grid.Row="2" Margin="0,8,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -313,7 +289,6 @@
                     </TextBlock>
                 </Grid>
 
-                <!-- Cancel Button -->
                 <Button Grid.Row="3"
                         Content="Cancel Processing"
                         Style="{StaticResource DangerButton}"
@@ -325,14 +300,12 @@
             </Grid>
         </Border>
 
-        <!-- ====== QUEUE & LOG PANEL ====== -->
         <Grid Grid.Row="3" Margin="20,12,20,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <!-- Section Tabs -->
             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
                 <TextBlock Text="Processing Queue"
                            Style="{StaticResource SubHeaderText}"
@@ -354,7 +327,6 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <!-- Job Queue List -->
                 <ListBox Grid.Column="0"
                          Style="{StaticResource JobListBox}"
                          ItemsSource="{Binding JobQueue}"
@@ -362,7 +334,6 @@
                          ItemContainerStyle="{StaticResource JobListItem}"
                          Margin="0,0,8,0"/>
 
-                <!-- Detailed Log Panel -->
                 <Border Grid.Column="1"
                         Background="{StaticResource BackgroundSecondary}"
                         BorderBrush="{StaticResource BorderPrimary}"
@@ -375,7 +346,6 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
 
-                        <!-- Log Header -->
                         <Border Grid.Row="0"
                                 Background="{StaticResource BackgroundElevated}"
                                 BorderBrush="{StaticResource BorderPrimary}"
@@ -388,7 +358,6 @@
                                        Foreground="{StaticResource TextSecondary}"/>
                         </Border>
 
-                        <!-- Log Content -->
                         <TextBox Grid.Row="1"
                                  Style="{StaticResource LogTextBox}"
                                  Text="{Binding ActiveJob.DetailedLog, FallbackValue='Ready to process...', Mode=OneWay}"
@@ -400,7 +369,6 @@
             </Grid>
         </Grid>
 
-        <!-- ====== STATUS BAR ====== -->
         <Border Grid.Row="4"
                 Background="{StaticResource BackgroundSecondary}"
                 BorderBrush="{StaticResource BorderPrimary}"
