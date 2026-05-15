@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic; // FIX: Added missing namespace for EqualityComparer
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
