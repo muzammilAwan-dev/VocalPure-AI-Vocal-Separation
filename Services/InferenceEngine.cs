@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Serilog;
 using VocalPure.Models;
 
 namespace VocalPure.Services
@@ -42,12 +43,16 @@ namespace VocalPure.Services
             try
             {
                 var availableProviders = OrtEnv.Instance().GetAvailableProviders();
-                return availableProviders.Contains("Dml") ||
-                       availableProviders.Contains("OpenVINO") ||
-                       availableProviders.Any(p => p.Contains("CUDA", StringComparison.OrdinalIgnoreCase));
+                bool hasGpu = availableProviders.Contains("Dml") ||
+                              availableProviders.Contains("OpenVINO") ||
+                              availableProviders.Any(p => p.Contains("CUDA", StringComparison.OrdinalIgnoreCase));
+                
+                Log.Debug("GPU Availability Check: {HasGpu} (Providers: {Providers})", hasGpu, string.Join(", ", availableProviders));
+                return hasGpu;
             }
-            catch
+            catch (Exception ex)
             {
+                Log.Warning(ex, "Failed to check ORT execution providers.");
                 return false;
             }
         }
@@ -55,26 +60,29 @@ namespace VocalPure.Services
         /// <summary>
         /// Loads an ONNX model with the best available execution provider.
         /// </summary>
-        /// <param name="modelPath">Path to the .onnx model file.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
         private void LoadModel(string modelPath, CancellationToken cancellationToken)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Reuse existing session if same model
             if (_session != null && _currentModelPath == modelPath)
+            {
+                Log.Debug("Model {ModelPath} is already loaded. Reusing session.", modelPath);
                 return;
+            }
 
-            // Dispose existing session
             _session?.Dispose();
             _session = null;
             _currentModelPath = null;
 
             if (!File.Exists(modelPath))
+            {
+                Log.Error("Model file not found at path: {ModelPath}", modelPath);
                 throw new FileNotFoundException($"ONNX model not found: {modelPath}");
+            }
 
-            // Build session options with execution provider priority
+            Log.Information("Loading ONNX Model: {ModelPath}", Path.GetFileName(modelPath));
+
             var sessionOptions = new SessionOptions
             {
                 LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
@@ -83,21 +91,19 @@ namespace VocalPure.Services
                 IntraOpNumThreads = _settings.IntraOpNumThreads
             };
 
-            // FIX 1: Add back the missing lastException declaration
             Exception? lastException = null;
 
-            // FIX 2: Explicitly specify Action types to help the compiler
             var providerPriority = new List<(string Name, Action<SessionOptions> Configure)>
             {
                 ("DirectML", new Action<SessionOptions>(opts =>
                 {
                     try
                     {
-                        // DirectML GPU acceleration
-                        opts.AppendExecutionProvider_DML(0); // GPU device 0
+                        opts.AppendExecutionProvider_DML(0); 
                     }
                     catch (Exception ex)
                     {
+                        Log.Warning(ex, "DirectML provider initialization failed.");
                         throw new InvalidOperationException("DirectML provider failed to initialize", ex);
                     }
                 })),
@@ -105,17 +111,17 @@ namespace VocalPure.Services
                 {
                     try
                     {
-                        // FIX 3: ORT 1.16.3 C# API uses a string device identifier, not a dictionary
                         opts.AppendExecutionProvider_OpenVINO("GPU_FP16");
                     }
                     catch (Exception ex)
                     {
+                        Log.Warning(ex, "OpenVINO provider initialization failed.");
                         throw new InvalidOperationException("OpenVINO provider failed to initialize", ex);
                     }
                 })),
                 ("CPU", new Action<SessionOptions>(opts =>
                 {
-                    // CPU is the default fallback - no configuration needed
+                    // CPU fallback
                 }))
             };
 
@@ -131,25 +137,22 @@ namespace VocalPure.Services
 
                     configure(testOptions);
 
-                    // Test-load the model
+                    Log.Debug("Attempting to load model with {ProviderName}...", providerName);
                     _session = new InferenceSession(modelPath, testOptions);
                     _currentModelPath = modelPath;
                     _activeExecutionProvider = providerName;
 
-                    // Verify model metadata
+                    Log.Information("Successfully initialized model using {ProviderName} execution provider.", providerName);
                     ValidateModelMetadata();
-
                     return;
                 }
                 catch (Exception ex) when (providerName != "CPU")
                 {
                     lastException = ex;
-                    // Try next provider
                     continue;
                 }
             }
 
-            // If we get here, all providers failed
             throw new InvalidOperationException(
                 "Failed to initialize any ONNX execution provider. " +
                 "Ensure Visual C++ Redistributables are installed." +
@@ -174,18 +177,15 @@ namespace VocalPure.Services
             progress?.Report((0, 0, 0, "Loading model..."));
             await Task.Run(() => LoadModel(modelPath, cancellationToken), cancellationToken);
 
-            // Get model input info
             var inputMetadata = _session!.InputMetadata;
             var outputMetadata = _session.OutputMetadata;
 
             string inputName = inputMetadata.Keys.First();
             string outputName = outputMetadata.Keys.First();
 
-            // Parse expected input shape
             int[] inputShape = inputMetadata[inputName].Dimensions;
-            long modelSampleSize = inputShape[inputShape.Length - 1]; // Last dimension is typically sample count
+            long modelSampleSize = inputShape[inputShape.Length - 1]; 
 
-            // Phase 2: Chunk and process audio
             using var chunker = new AudioChunker(
                 _settings.SampleRate,
                 _settings.Channels,
@@ -195,9 +195,18 @@ namespace VocalPure.Services
             long totalSamples = chunker.GetTotalSamples(inputWavPath);
             int totalChunks = chunker.GetChunkCount(totalSamples);
 
+            Log.Information("Starting inference. Total Samples: {TotalSamples}, Total Chunks: {TotalChunks}", totalSamples, totalChunks);
             progress?.Report((0, 0, totalChunks, _activeExecutionProvider));
 
-            var processedChunks = new List<float[]>();
+            // FIX 1 (RAM Time Bomb): Allocate the massive stitched array exactly ONCE instead of holding chunks in a List
+            float[] finalStitchedOutput = new float[totalSamples];
+            long writePosition = 0;
+
+            // FIX 2 (LOH Fragmentation): Pre-allocate large buffers once to reuse during inference to prevent GC spiking
+            int maxBufferSize = chunker.SamplesPerChunk * chunker.Channels * 3; // Safety margin
+            float[] paddedBuffer = new float[maxBufferSize];
+            float[] planarBuffer = new float[maxBufferSize];
+            float[] interleavedBuffer = new float[maxBufferSize];
 
             for (int i = 0; i < totalChunks; i++)
             {
@@ -205,123 +214,122 @@ namespace VocalPure.Services
 
                 progress?.Report(((double)i / totalChunks, i + 1, totalChunks, _activeExecutionProvider));
 
-                // Read chunk from file
                 float[] chunk = await Task.Run(() => chunker.ReadChunk(inputWavPath, i), cancellationToken);
 
-                // Run inference on this chunk
                 float[] outputChunk = await Task.Run(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    return RunInference(chunk, inputName, outputName, modelSampleSize);
+                    // Pass reusable buffers to prevent LOH allocations
+                    return RunInference(chunk, inputName, outputName, paddedBuffer, planarBuffer, interleavedBuffer);
                 }, cancellationToken);
 
-                // Apply crossfade windowing
                 chunker.ApplyWindow(outputChunk, i, totalChunks);
 
-                processedChunks.Add(outputChunk);
+                // Stream directly to the massive array, abandoning the small chunk
+                chunker.WriteChunkToBuffer(finalStitchedOutput, outputChunk, i, totalChunks, ref writePosition);
 
-                // Force GC between chunks to manage memory
+                // Force GC to clear the small abandoned objects
                 if (i % 3 == 0)
                 {
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
+                    GC.Collect(0, GCCollectionMode.Optimized);
                 }
             }
 
+            Log.Information("Inference complete. Writing output WAV to disk.");
             progress?.Report((0.95, totalChunks, totalChunks, _activeExecutionProvider));
 
-            // Phase 3: Stitch chunks and write output
-            float[] stitchedOutput = chunker.StitchChunks(processedChunks.ToArray(), totalSamples);
-            chunker.WriteWavFile(outputVocalsPath, stitchedOutput);
+            chunker.WriteWavFile(outputVocalsPath, finalStitchedOutput);
 
             progress?.Report((1.0, totalChunks, totalChunks, _activeExecutionProvider));
         }
 
         /// <summary>
-        /// Runs a single inference pass on an audio chunk.
+        /// Runs a single inference pass on an audio chunk using pre-allocated buffers.
         /// </summary>
-        private float[] RunInference(float[] audioChunk, string inputName, string outputName, long modelSampleSize)
+        private float[] RunInference(
+            float[] audioChunk, 
+            string inputName, 
+            string outputName, 
+            float[] paddedBuffer, 
+            float[] planarBuffer, 
+            float[] interleavedBuffer)
         {
             if (_session == null) throw new InvalidOperationException("Model not loaded.");
 
-            // Prepare input tensor with correct shape
-            // MDX-Net expects (batch, channels, samples) or (batch, samples)
-            // We detect the expected shape and adapt
             var inputMetadata = _session.InputMetadata[inputName];
             int[] expectedDims = inputMetadata.Dimensions;
 
-            // Create tensor with correct shape
             Tensor<float> inputTensor;
             int[] actualShape;
 
             if (expectedDims.Length == 3)
             {
-                // Shape: (batch=1, channels=2, samples)
                 int channelDim = expectedDims[1] == -1 ? _settings.Channels : expectedDims[1];
                 long sampleDim = expectedDims[2] == -1 ? audioChunk.Length / channelDim : expectedDims[2];
 
                 actualShape = new[] { 1, channelDim, (int)sampleDim };
-
-                // If chunk is smaller than expected, pad with zeros
                 int requiredLength = (int)(channelDim * sampleDim);
-                float[] paddedChunk = PadOrTrimChunk(audioChunk, requiredLength);
 
-                // Reshape from interleaved (L,R,L,R) to planar (L...,R...)
-                float[] planarData = InterleavedToPlanar(paddedChunk, channelDim);
+                // Reusing paddedBuffer
+                Array.Clear(paddedBuffer, 0, requiredLength);
+                Array.Copy(audioChunk, 0, paddedBuffer, 0, Math.Min(audioChunk.Length, requiredLength));
 
-                inputTensor = new DenseTensor<float>(planarData, actualShape);
+                // Reusing planarBuffer
+                InterleavedToPlanar(paddedBuffer, planarBuffer, channelDim, requiredLength);
+
+                inputTensor = new DenseTensor<float>(planarBuffer.AsMemory(0, requiredLength), actualShape);
             }
             else if (expectedDims.Length == 2)
             {
-                // Shape: (batch=1, samples)
                 long sampleDim = expectedDims[1] == -1 ? audioChunk.Length : expectedDims[1];
                 actualShape = new[] { 1, (int)sampleDim };
-
                 int requiredLength = (int)sampleDim;
-                float[] paddedChunk = PadOrTrimChunk(audioChunk, requiredLength);
 
-                inputTensor = new DenseTensor<float>(paddedChunk, actualShape);
+                // Reusing paddedBuffer
+                Array.Clear(paddedBuffer, 0, requiredLength);
+                Array.Copy(audioChunk, 0, paddedBuffer, 0, Math.Min(audioChunk.Length, requiredLength));
+
+                inputTensor = new DenseTensor<float>(paddedBuffer.AsMemory(0, requiredLength), actualShape);
             }
             else
             {
-                // Fallback: 1D tensor
                 actualShape = new[] { audioChunk.Length };
                 inputTensor = new DenseTensor<float>(audioChunk, actualShape);
             }
 
-            // Create input container
             var inputs = new List<NamedOnnxValue>
             {
                 NamedOnnxValue.CreateFromTensor(inputName, inputTensor)
             };
 
-            // Run inference
             using var results = _session.Run(inputs);
             var outputTensor = results.First(r => r.Name == outputName).AsTensor<float>();
 
-            // Extract output data
-            float[] outputData = outputTensor.ToArray();
+            float[] rawOutput = outputTensor.ToArray();
 
-            // If output is planar (channels, samples), convert back to interleaved
             if (expectedDims.Length == 3 && _settings.Channels == 2)
             {
-                outputData = PlanarToInterleaved(outputData, outputTensor.Dimensions);
+                // Reusing interleavedBuffer
+                PlanarToInterleaved(rawOutput, interleavedBuffer, outputTensor.Dimensions);
+                
+                float[] finalChunk = new float[audioChunk.Length];
+                Array.Copy(interleavedBuffer, 0, finalChunk, 0, audioChunk.Length);
+                return finalChunk;
             }
-
-            // Trim back to original chunk size (remove padding)
-            outputData = TrimToLength(outputData, audioChunk.Length);
-
-            return outputData;
+            else
+            {
+                float[] finalChunk = new float[audioChunk.Length];
+                Array.Copy(rawOutput, 0, finalChunk, 0, Math.Min(rawOutput.Length, audioChunk.Length));
+                return finalChunk;
+            }
         }
 
         /// <summary>
-        /// Converts interleaved audio (L,R,L,R) to planar format (L...,R...).
+        /// Converts interleaved audio (L,R,L,R) to planar format (L...,R...) into a pre-allocated buffer.
         /// </summary>
-        private static float[] InterleavedToPlanar(float[] interleaved, int channels)
+        private static void InterleavedToPlanar(float[] interleaved, float[] planar, int channels, int requiredLength)
         {
-            int samplesPerChannel = interleaved.Length / channels;
-            float[] planar = new float[interleaved.Length];
-
+            int samplesPerChannel = requiredLength / channels;
             for (int ch = 0; ch < channels; ch++)
             {
                 for (int s = 0; s < samplesPerChannel; s++)
@@ -329,23 +337,22 @@ namespace VocalPure.Services
                     planar[ch * samplesPerChannel + s] = interleaved[s * channels + ch];
                 }
             }
-
-            return planar;
         }
 
         /// <summary>
-        /// Converts planar audio (L...,R...) back to interleaved format (L,R,L,R).
+        /// Converts planar audio (L...,R...) back to interleaved format (L,R,L,R) into a pre-allocated buffer.
         /// </summary>
-        private static float[] PlanarToInterleaved(float[] planar, ReadOnlySpan<int> outputShape)
+        private static void PlanarToInterleaved(float[] planar, float[] interleaved, ReadOnlySpan<int> outputShape)
         {
-            if (outputShape.Length < 3) return planar;
+            if (outputShape.Length < 3) 
+            {
+                Array.Copy(planar, interleaved, planar.Length);
+                return;
+            }
 
             int batchSize = outputShape[0];
             int channels = outputShape[1];
             int samplesPerChannel = outputShape[2];
-
-            int totalSamples = batchSize * channels * samplesPerChannel;
-            float[] interleaved = new float[totalSamples];
 
             for (int b = 0; b < batchSize; b++)
             {
@@ -359,36 +366,6 @@ namespace VocalPure.Services
                     }
                 }
             }
-
-            return interleaved;
-        }
-
-        /// <summary>
-        /// Pads or trims a chunk to the required length.
-        /// </summary>
-        private static float[] PadOrTrimChunk(float[] chunk, int requiredLength)
-        {
-            if (chunk.Length == requiredLength)
-                return chunk;
-
-            var result = new float[requiredLength];
-            int copyLength = Math.Min(chunk.Length, requiredLength);
-            Array.Copy(chunk, 0, result, 0, copyLength);
-            // Remainder is zero-padded (silence)
-            return result;
-        }
-
-        /// <summary>
-        /// Trims output back to the original chunk length.
-        /// </summary>
-        private static float[] TrimToLength(float[] data, int targetLength)
-        {
-            if (data.Length <= targetLength)
-                return data;
-
-            float[] trimmed = new float[targetLength];
-            Array.Copy(data, 0, trimmed, 0, targetLength);
-            return trimmed;
         }
 
         /// <summary>
@@ -410,23 +387,18 @@ namespace VocalPure.Services
                 if (outputMetadata.Count == 0)
                     throw new InvalidOperationException("Model has no output nodes.");
 
-                // Log model info for debugging
-                System.Diagnostics.Debug.WriteLine($"Model loaded: {modelMetadata.Description}");
-                System.Diagnostics.Debug.WriteLine($"Producer: {modelMetadata.ProducerName}");
-                System.Diagnostics.Debug.WriteLine($"Version: {modelMetadata.Version}");
-                System.Diagnostics.Debug.WriteLine($"Inputs: {string.Join(", ", inputMetadata.Keys)}");
-                System.Diagnostics.Debug.WriteLine($"Outputs: {string.Join(", ", outputMetadata.Keys)}");
+                Log.Debug("Model loaded: {Description} | Producer: {ProducerName} | Version: {Version}", 
+                    modelMetadata.Description, modelMetadata.ProducerName, modelMetadata.Version);
 
                 foreach (var kvp in inputMetadata)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"  Input '{kvp.Key}': [{string.Join(", ", kvp.Value.Dimensions)}] ({kvp.Value.ElementType})");
+                    Log.Debug("Model Input '{Key}': [{Dimensions}] ({ElementType})", 
+                        kvp.Key, string.Join(", ", kvp.Value.Dimensions), kvp.Value.ElementType);
                 }
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Model metadata validation warning: {ex.Message}");
-                // Don't fail on metadata warnings
+                Log.Warning(ex, "Model metadata validation warning.");
             }
         }
 
@@ -443,9 +415,9 @@ namespace VocalPure.Services
                 _session?.Dispose();
                 _session = null;
             }
-            catch
+            catch (Exception ex)
             {
-                // Best effort cleanup
+                Log.Warning(ex, "Exception during InferenceEngine disposal.");
             }
         }
     }
