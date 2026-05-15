@@ -57,7 +57,8 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Reads a WAV file and returns the total number of float samples (interleaved).</summary>
+        /// Reads a WAV file and returns the total number of float samples (interleaved).
+        /// </summary>
         public long GetTotalSamples(string wavFilePath)
         {
             using var reader = new WaveFileReader(wavFilePath);
@@ -67,7 +68,8 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Gets the total number of chunks needed for a given sample count.</summary>
+        /// Gets the total number of chunks needed for a given sample count.
+        /// </summary>
         public int GetChunkCount(long totalSamples)
         {
             if (totalSamples <= _chunkSize)
@@ -182,63 +184,54 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Stitches processed chunks together into a complete output array.
+        /// FIX: Streams a single processed chunk directly into the pre-allocated output array.
+        /// This prevents holding all chunks in RAM simultaneously.
         /// </summary>
-        /// <param name="chunks">Array of processed chunks.</param>
-        /// <param name="totalOutputSamples">Expected total output sample count.</param>
-        /// <returns>Combined audio data.</returns>
-        public float[] StitchChunks(float[][] chunks, long totalOutputSamples)
+        public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, int totalChunks, ref long writePosition)
         {
-            if (chunks.Length == 1)
-                return chunks[0];
-
-            var result = new float[totalOutputSamples];
-            long writePosition = 0;
-
-            for (int i = 0; i < chunks.Length; i++)
+            if (totalChunks == 1)
             {
-                float[] chunk = chunks[i];
-
-                if (i == 0)
-                {
-                    // First chunk: write everything except trailing overlap
-                    int writeLength = chunk.Length - _overlapSize;
-                    Array.Copy(chunk, 0, result, 0, writeLength);
-                    writePosition = writeLength;
-                }
-                else if (i == chunks.Length - 1)
-                {
-                    // Last chunk: write starting from overlap (adds to existing data)
-                    int startIdx = _overlapSize;
-                    int writeLength = (int)Math.Min(chunk.Length - startIdx, totalOutputSamples - writePosition);
-
-                    for (int j = 0; j < writeLength; j++)
-                    {
-                        int destIdx = (int)(writePosition + j);
-                        if (destIdx < result.Length)
-                            result[destIdx] += chunk[startIdx + j];
-                    }
-                }
-                else
-                {
-                    // Middle chunk: add overlap region, write non-overlap
-                    // Add the leading overlap to existing data
-                    for (int j = 0; j < _overlapSize && writePosition - _overlapSize + j >= 0; j++)
-                    {
-                        int destIdx = (int)(writePosition - _overlapSize + j);
-                        if (destIdx >= 0 && destIdx < result.Length)
-                            result[destIdx] += chunk[j];
-                    }
-
-                    // Write the non-overlapping portion
-                    int startIdx = _overlapSize;
-                    int writeLength = chunk.Length - (_overlapSize * 2);
-                    Array.Copy(chunk, startIdx, result, writePosition, writeLength);
-                    writePosition += writeLength;
-                }
+                Array.Copy(chunk, 0, resultBuffer, 0, Math.Min(chunk.Length, resultBuffer.Length));
+                return;
             }
 
-            return result;
+            if (chunkIndex == 0)
+            {
+                // First chunk: write everything except trailing overlap
+                int writeLength = chunk.Length - _overlapSize;
+                Array.Copy(chunk, 0, resultBuffer, 0, writeLength);
+                writePosition = writeLength;
+            }
+            else if (chunkIndex == totalChunks - 1)
+            {
+                // Last chunk: write starting from overlap (adds to existing data)
+                int startIdx = _overlapSize;
+                int writeLength = (int)Math.Min(chunk.Length - startIdx, resultBuffer.Length - writePosition);
+
+                for (int j = 0; j < writeLength; j++)
+                {
+                    int destIdx = (int)(writePosition + j);
+                    if (destIdx < resultBuffer.Length)
+                        resultBuffer[destIdx] += chunk[startIdx + j];
+                }
+            }
+            else
+            {
+                // Middle chunk: add overlap region, write non-overlap
+                // Add the leading overlap to existing data
+                for (int j = 0; j < _overlapSize && writePosition - _overlapSize + j >= 0; j++)
+                {
+                    int destIdx = (int)(writePosition - _overlapSize + j);
+                    if (destIdx >= 0 && destIdx < resultBuffer.Length)
+                        resultBuffer[destIdx] += chunk[j];
+                }
+
+                // Write the non-overlapping portion
+                int startIdx = _overlapSize;
+                int writeLength = chunk.Length - (_overlapSize * 2);
+                Array.Copy(chunk, startIdx, resultBuffer, writePosition, writeLength);
+                writePosition += writeLength;
+            }
         }
 
         /// <summary>
