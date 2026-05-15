@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
+using VocalPure.Models; // FIX: Added missing namespace
 
 namespace VocalPure.Converters
 {
@@ -60,9 +61,9 @@ namespace VocalPure.Converters
     {
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            if (value is Models.ProcessingPhase phase)
+            if (value is ProcessingPhase phase)
             {
-                bool isActive = phase != Models.ProcessingPhase.Idle && !phase.IsTerminal();
+                bool isActive = phase != ProcessingPhase.Idle && !phase.IsTerminal();
                 return isActive ? Visibility.Visible : Visibility.Collapsed;
             }
             return Visibility.Collapsed;
@@ -123,7 +124,7 @@ namespace VocalPure.Converters
     /// <summary>
     /// Converts a processing phase to a status color brush.
     /// </summary>
-    [ValueConversion(typeof(Models.ProcessingPhase), typeof(System.Windows.Media.Brush))]
+    [ValueConversion(typeof(ProcessingPhase), typeof(System.Windows.Media.Brush))]
     public sealed class PhaseToBrushConverter : IValueConverter
     {
         public System.Windows.Media.Brush ActiveBrush { get; set; } = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.DodgerBlue);
@@ -134,14 +135,14 @@ namespace VocalPure.Converters
 
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
-            if (value is Models.ProcessingPhase phase)
+            if (value is ProcessingPhase phase)
             {
                 return phase switch
                 {
-                    Models.ProcessingPhase.Completed => SuccessBrush,
-                    Models.ProcessingPhase.Error => ErrorBrush,
-                    Models.ProcessingPhase.Cancelled => CancelledBrush,
-                    Models.ProcessingPhase.Idle => IdleBrush,
+                    ProcessingPhase.Completed => SuccessBrush,
+                    ProcessingPhase.Error => ErrorBrush,
+                    ProcessingPhase.Cancelled => CancelledBrush,
+                    ProcessingPhase.Idle => IdleBrush,
                     _ => ActiveBrush
                 };
             }
