@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using Serilog;
 using VocalPure.Models;
 using VocalPure.Services;
 
@@ -142,6 +143,8 @@ namespace VocalPure.ViewModels
             try
             {
                 EngineStatus = "Initializing engine dependencies...";
+                Log.Information("Starting engine dependency initialization...");
+                
                 await _dependencyManager.InitializeAsync();
 
                 // Check GPU availability
@@ -150,10 +153,13 @@ namespace VocalPure.ViewModels
                 EngineStatus = hasGpu
                     ? "Engine ready - GPU acceleration available"
                     : "Engine ready - CPU mode";
+                    
+                Log.Information("Engine initialization complete. GPU Available: {GpuAvailable}", hasGpu);
             }
             catch (Exception ex)
             {
                 EngineStatus = $"Engine initialization failed: {ex.Message}";
+                Log.Error(ex, "Failed to initialize the dependency engine.");
                 MessageBox.Show($"Failed to initialize engine: {ex.Message}",
                     "Initialization Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
@@ -176,11 +182,16 @@ namespace VocalPure.ViewModels
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 if (validExtensions.Contains(ext) && File.Exists(path))
                 {
+                    Log.Information("Adding file to queue: {FilePath}", path);
                     var job = new SeparationJob(path)
                     {
                         IsVideoOutput = IsVideoFile(path)
                     };
                     JobQueue.Add(job);
+                }
+                else
+                {
+                    Log.Warning("Skipped invalid or missing file: {FilePath}", path);
                 }
             }
 
@@ -232,6 +243,8 @@ namespace VocalPure.ViewModels
             _currentCts = new CancellationTokenSource();
             CancellationToken token = _currentCts.Token;
             string tempDir = Path.Combine(Path.GetTempPath(), "VocalPure", job.Id);
+            
+            Log.Information("Starting job ID: {JobId} for file: {FileName}", job.Id, job.FileName);
 
             try
             {
@@ -257,6 +270,7 @@ namespace VocalPure.ViewModels
                 job.Phase = ProcessingPhase.ExtractingAudio;
                 string wavPath = Path.Combine(tempDir, "input.wav");
                 Directory.CreateDirectory(tempDir);
+                Log.Debug("Phase 1: Extracting to {WavPath}", wavPath);
 
                 job.AppendLog("Phase 1: Extracting audio with FFmpeg...");
                 var extractReporter = new Progress<double>(p =>
@@ -274,6 +288,7 @@ namespace VocalPure.ViewModels
 
                 string vocalsWavPath = Path.Combine(tempDir, "vocals.wav");
                 string modelPath = _inferenceSettings.ModelPath;
+                Log.Debug("Phase 2: Loading model from {ModelPath}", modelPath);
 
                 if (!File.Exists(modelPath))
                     throw new FileNotFoundException($"ONNX model not found: {modelPath}");
@@ -297,6 +312,8 @@ namespace VocalPure.ViewModels
                 job.AppendLog("Phase 3: Encoding final output...");
 
                 string outputPath = GenerateOutputPath(job);
+                Log.Debug("Phase 3: Output targeting {OutputPath}", outputPath);
+                
                 var mergeReporter = new Progress<double>(p =>
                     ((IProgress<(ProcessingPhase, double, string)>)progress).Report((
                         ProcessingPhase.MergingOutput, p, $"FFmpeg encode: {p:P0}")));
@@ -322,11 +339,13 @@ namespace VocalPure.ViewModels
 
                 job.Phase = ProcessingPhase.Completed;
                 job.AppendLog("Processing completed successfully!");
+                Log.Information("Job completed successfully: {JobId}", job.Id);
             }
             catch (OperationCanceledException)
             {
                 job.Phase = ProcessingPhase.Cancelled;
                 job.AppendLog("Processing cancelled.");
+                Log.Warning("Job cancelled: {JobId}", job.Id);
                 CleanupTempDirectory(tempDir);
             }
             catch (Exception ex)
@@ -334,6 +353,7 @@ namespace VocalPure.ViewModels
                 job.Phase = ProcessingPhase.Error;
                 job.ErrorMessage = ex.Message;
                 job.AppendLog($"ERROR: {ex.Message}");
+                Log.Error(ex, "Job failed: {JobId}", job.Id);
                 if (ex.InnerException != null)
                     job.AppendLog($"Inner: {ex.InnerException.Message}");
                 CleanupTempDirectory(tempDir);
@@ -410,12 +430,12 @@ namespace VocalPure.ViewModels
                         try { File.Delete(file); } catch { /* best effort */ }
                     }
                     Directory.Delete(tempDir, true);
+                    Log.Debug("Cleaned up temporary directory: {TempDir}", tempDir);
                 }
             }
             catch (Exception ex)
             {
-                // Log but don't fail on cleanup errors
-                System.Diagnostics.Debug.WriteLine($"Cleanup warning: {ex.Message}");
+                Log.Warning(ex, "Failed to fully clean temporary directory: {TempDir}", tempDir);
             }
         }
 
@@ -432,6 +452,7 @@ namespace VocalPure.ViewModels
             {
                 _currentCts?.Cancel();
                 ActiveJob?.AppendLog("Cancellation requested...");
+                Log.Information("Cancellation requested by user for active job.");
             }
             catch (ObjectDisposedException)
             {
@@ -450,6 +471,7 @@ namespace VocalPure.ViewModels
                 JobQueue.Remove(job);
                 job.Dispose();
             }
+            Log.Information("Cleared {Count} completed/terminal jobs from queue.", completed.Count);
         }
 
         /// <summary>
