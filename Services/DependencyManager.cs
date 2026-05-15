@@ -35,8 +35,9 @@ namespace VocalPure.Services
         {
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             _engineDirectory = Path.Combine(localAppData, "VocalPure", "Engine");
-            _appDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)
-                ?? AppDomain.CurrentDomain.BaseDirectory;
+            
+            // FIX: Use AppContext.BaseDirectory instead of Assembly.Location for Single-File compatibility
+            _appDirectory = AppContext.BaseDirectory;
             _isInitialized = false;
         }
 
