@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks; // FIX: Added missing namespace for UnobservedTaskExceptionEventArgs
 using System.Windows;
 
 namespace VocalPure
