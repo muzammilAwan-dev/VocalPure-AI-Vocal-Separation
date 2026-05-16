@@ -3,7 +3,6 @@ using System.IO;
 using System.Threading.Tasks;
 using MathNet.Numerics;
 using MathNet.Numerics.IntegralTransforms;
-using NAudio.Wave;
 
 namespace VocalPure.Services
 {
@@ -25,19 +24,18 @@ namespace VocalPure.Services
         private readonly float[] _window;
 
         // --- ZERO-ALLOCATION MEMORY POOL ---
-        private readonly float[] _readBuffer;
         private readonly float[] _leftBuf;
         private readonly float[] _rightBuf;
-        private readonly float[] _tensorData;
         private readonly float[] _leftOutBuf;
         private readonly float[] _rightOutBuf;
         private readonly float[] _leftWindowSum;
         private readonly float[] _rightWindowSum;
-        
         private readonly Complex32[] _leftComplexBuf;
         private readonly Complex32[] _rightComplexBuf;
-        
         private readonly float[] _finalChunkBuf;
+
+        // NEW: Rolling buffer to handle seamless overlap-add streaming from pipes
+        private readonly float[] _overlapBuffer;
 
         public AudioChunker(int sampleRate = 44100, int channels = 2)
         {
@@ -50,10 +48,8 @@ namespace VocalPure.Services
                 _window[i] = 0.5f * (1.0f - (float)Math.Cos(2.0 * Math.PI * i / FftSize));
             }
 
-            _readBuffer = new float[ChunkSize * _channels];
             _leftBuf = new float[ChunkSize];
             _rightBuf = new float[ChunkSize];
-            _tensorData = new float[4 * FreqBins * TimeFrames];
             _leftOutBuf = new float[ChunkSize];
             _rightOutBuf = new float[ChunkSize];
             _leftWindowSum = new float[ChunkSize];
@@ -61,61 +57,69 @@ namespace VocalPure.Services
             _leftComplexBuf = new Complex32[FftSize];
             _rightComplexBuf = new Complex32[FftSize];
             _finalChunkBuf = new float[ChunkSize * _channels];
+            
+            // Overlap is exactly 2x the Trim margin for U-Net edge smoothing
+            _overlapBuffer = new float[Trim * 2 * _channels]; 
         }
 
-        public long GetTotalSamples(string wavFilePath)
-        {
-            using var reader = new AudioFileReader(wavFilePath);
-            return reader.Length / (reader.WaveFormat.BitsPerSample / 8);
-        }
-
-        public int GetChunkCount(long totalSamples)
-        {
-            long samplesPerChannel = totalSamples / _channels;
-            long pad = GenSize - (samplesPerChannel % GenSize);
-            long totalPadded = samplesPerChannel + pad;
-            return (int)(totalPadded / GenSize);
-        }
-
-        public float[] ReadAndTransformChunk(string wavFilePath, int chunkIndex)
+        /// <summary>
+        /// Reads exactly one GenSize step from the raw byte stream, merges it with the rolling overlap buffer, 
+        /// and mathematically transforms it into AI-ready Tensors.
+        /// </summary>
+        public int ReadAndTransformStreamChunk(Stream inputStream, float[] tensorDataOut)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
-            Array.Clear(_leftBuf, 0, ChunkSize);
-            Array.Clear(_rightBuf, 0, ChunkSize);
-            Array.Clear(_tensorData, 0, _tensorData.Length);
-
-            long startSample = (long)chunkIndex * GenSize;
-            long readStart = startSample - Trim;
+            int floatsToRead = GenSize * _channels;
+            int bytesToRead = floatsToRead * sizeof(float);
+            byte[] byteBuf = new byte[bytesToRead];
             
-            long fileStart = Math.Max(0, readStart);
-            int trimStart = (int)(fileStart - readStart); 
-
-            using (var reader = new AudioFileReader(wavFilePath))
+            int totalBytesRead = 0;
+            while (totalBytesRead < bytesToRead)
             {
-                long fileTotalPerChannel = reader.Length / reader.WaveFormat.BlockAlign;
-                long fileSamplesToRead = Math.Min(ChunkSize - trimStart, fileTotalPerChannel - fileStart);
-                
-                if (fileSamplesToRead > 0)
-                {
-                    reader.Position = fileStart * reader.WaveFormat.BlockAlign;
-                    int floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
-                    
-                    int validSamples = floatsRead / _channels;
-                    for (int i = 0; i < validSamples; i++)
-                    {
-                        _leftBuf[trimStart + i] = _readBuffer[i * _channels];
-                        _rightBuf[trimStart + i] = _channels > 1 ? _readBuffer[i * _channels + 1] : _readBuffer[i * _channels];
-                    }
-                }
+                int read = inputStream.Read(byteBuf, totalBytesRead, bytesToRead - totalBytesRead);
+                if (read == 0) break; // EOF Reached
+                totalBytesRead += read;
             }
 
+            int floatsRead = totalBytesRead / sizeof(float);
+            if (floatsRead == 0) return 0; // Stream completely drained
+
+            // Convert raw bytes from FFmpeg into C# floats
+            float[] freshFloats = new float[floatsRead];
+            Buffer.BlockCopy(byteBuf, 0, freshFloats, 0, totalBytesRead);
+
+            // Stitch the previous chunk's edge to the new chunk's start
+            int combinedLength = _overlapBuffer.Length + floatsRead;
+            float[] combined = new float[combinedLength];
+            Array.Copy(_overlapBuffer, 0, combined, 0, _overlapBuffer.Length);
+            Array.Copy(freshFloats, 0, combined, _overlapBuffer.Length, floatsRead);
+
+            // Save the new tail end into the overlap buffer for the NEXT read
+            Array.Clear(_overlapBuffer, 0, _overlapBuffer.Length);
+            if (combinedLength >= _overlapBuffer.Length)
+            {
+                Array.Copy(combined, combinedLength - _overlapBuffer.Length, _overlapBuffer, 0, _overlapBuffer.Length);
+            }
+
+            Array.Clear(_leftBuf, 0, ChunkSize);
+            Array.Clear(_rightBuf, 0, ChunkSize);
+            Array.Clear(tensorDataOut, 0, tensorDataOut.Length);
+
+            int validSamplesThisChunk = combinedLength / _channels;
+            for (int i = 0; i < validSamplesThisChunk && i < ChunkSize; i++)
+            {
+                _leftBuf[i] = combined[i * _channels];
+                _rightBuf[i] = _channels > 1 ? combined[i * _channels + 1] : combined[i * _channels];
+            }
+
+            // Math execution
             Parallel.Invoke(
-                () => ProcessStftChannel(_leftBuf, _tensorData, 0, 1, _leftComplexBuf),
-                () => ProcessStftChannel(_rightBuf, _tensorData, 2, 3, _rightComplexBuf)
+                () => ProcessStftChannel(_leftBuf, tensorDataOut, 0, 1, _leftComplexBuf),
+                () => ProcessStftChannel(_rightBuf, tensorDataOut, 2, 3, _rightComplexBuf)
             );
 
-            return _tensorData;
+            return validSamplesThisChunk; // Tell the caller exactly how much data is in this chunk
         }
 
         private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realIdx, int imagIdx, Complex32[] complexBuf)
@@ -196,26 +200,23 @@ namespace VocalPure.Services
             }
         }
 
-        // NEW: Creates the direct pipeline to the hard drive
-        public WaveFileWriter CreateStreamWriter(string filePath)
+        /// <summary>
+        /// Converts the math floats back into raw byte sequences so they can be 
+        /// pushed directly into the FFmpeg encoding pipe. Drops the overlap padding.
+        /// </summary>
+        public byte[] ExtractValidAudioBytes(float[] finalChunk, int validSamplesProcessed)
         {
-            var format = WaveFormat.CreateIeeeFloatWaveFormat(_sampleRate, _channels);
-            return new WaveFileWriter(filePath, format);
-        }
+            int maxValidFloats = GenSize * _channels;
+            int startFloatIndex = Trim * _channels; // UVR5 Left Margin Drop
+            
+            // Calculate how much actual valid audio we created (to handle the very last truncated chunk)
+            int lengthToCopy = Math.Min(maxValidFloats, (validSamplesProcessed * _channels) - startFloatIndex);
+            if (lengthToCopy < 0) return Array.Empty<byte>();
 
-        // NEW: Streams the 6-second chunk directly to disk and cuts off excess padding
-        public void WriteChunkToStream(WaveFileWriter writer, float[] chunk, ref long remainingSamplesToWrite)
-        {
-            int trimSamples = Trim * _channels;
-            int validLength = GenSize * _channels;
+            byte[] outBytes = new byte[lengthToCopy * sizeof(float)];
+            Buffer.BlockCopy(finalChunk, startFloatIndex * sizeof(float), outBytes, 0, outBytes.Length);
             
-            int writeLength = (int)Math.Min(validLength, remainingSamplesToWrite);
-            
-            if (writeLength > 0)
-            {
-                writer.WriteSamples(chunk, trimSamples, writeLength);
-                remainingSamplesToWrite -= writeLength;
-            }
+            return outBytes;
         }
 
         public void Dispose()
