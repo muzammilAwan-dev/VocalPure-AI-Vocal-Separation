@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using MathNet.Numerics;
 using MathNet.Numerics.IntegralTransforms;
 using NAudio.Wave;
@@ -7,8 +8,8 @@ using NAudio.Wave;
 namespace VocalPure.Services
 {
     /// <summary>
-    /// Advanced STFT Audio Processor strictly matching UVR5 MDX-Net Python architecture.
-    /// Safely handles float conversion and precisely pads U-Net boundaries to prevent artifacting.
+    /// Advanced STFT Audio Processor matching UVR5 MDX-Net architecture.
+    /// Features Zero-Allocation Memory Pooling and Parallel Channel Processing.
     /// </summary>
     public sealed class AudioChunker : IDisposable
     {
@@ -16,35 +17,60 @@ namespace VocalPure.Services
         private readonly int _channels;
         private bool _isDisposed;
 
-        // MDX-Net Strict Mathematical Constants
-        private const int FftSize = 6144;
-        private const int HopSize = 1024;
-        private const int TimeFrames = 256;
-        private const int FreqBins = 3072;
+        public const int FftSize = 6144;
+        public const int HopSize = 1024;
+        public const int TimeFrames = 256;
+        public const int FreqBins = 3072;
         
-        // UVR5 Overlap-Add Architecture
-        public const int ChunkSize = (TimeFrames - 1) * HopSize + FftSize; // 267,264 samples
-        public const int Trim = FftSize / 2;                               // 3,072 samples
-        public const int GenSize = ChunkSize - 2 * Trim;                   // 261,120 samples (The true step size)
+        public const int ChunkSize = (TimeFrames - 1) * HopSize + FftSize;
+        public const int Trim = FftSize / 2;
+        public const int GenSize = ChunkSize - 2 * Trim;
 
         private readonly float[] _window;
+
+        // --- ZERO-ALLOCATION MEMORY POOL ---
+        private readonly float[] _readBuffer;
+        private readonly float[] _leftBuf;
+        private readonly float[] _rightBuf;
+        private readonly float[] _tensorData;
+        private readonly float[] _leftOutBuf;
+        private readonly float[] _rightOutBuf;
+        private readonly float[] _leftWindowSum;
+        private readonly float[] _rightWindowSum;
+        
+        // Two independent complex buffers to allow parallel multi-threading
+        private readonly Complex32[] _leftComplexBuf;
+        private readonly Complex32[] _rightComplexBuf;
+        
+        private readonly float[] _finalChunkBuf;
 
         public AudioChunker(int sampleRate = 44100, int channels = 2)
         {
             _sampleRate = sampleRate;
             _channels = channels;
             
-            // Generate Hann Window matching torch.hann_window(periodic=True)
             _window = new float[FftSize];
             for (int i = 0; i < FftSize; i++)
             {
                 _window[i] = 0.5f * (1.0f - (float)Math.Cos(2.0 * Math.PI * i / FftSize));
             }
+
+            // Allocate memory block exactly once
+            _readBuffer = new float[ChunkSize * _channels];
+            _leftBuf = new float[ChunkSize];
+            _rightBuf = new float[ChunkSize];
+            _tensorData = new float[4 * FreqBins * TimeFrames];
+            _leftOutBuf = new float[ChunkSize];
+            _rightOutBuf = new float[ChunkSize];
+            _leftWindowSum = new float[ChunkSize];
+            _rightWindowSum = new float[ChunkSize];
+            _leftComplexBuf = new Complex32[FftSize];
+            _rightComplexBuf = new Complex32[FftSize];
+            _finalChunkBuf = new float[ChunkSize * _channels];
         }
 
         public long GetTotalSamples(string wavFilePath)
         {
-            // AudioFileReader safely resolves the bit-depth corruption issue
             using var reader = new AudioFileReader(wavFilePath);
             return reader.Length / (reader.WaveFormat.BitsPerSample / 8);
         }
@@ -61,16 +87,16 @@ namespace VocalPure.Services
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
+            Array.Clear(_leftBuf, 0, ChunkSize);
+            Array.Clear(_rightBuf, 0, ChunkSize);
+            Array.Clear(_tensorData, 0, _tensorData.Length);
+
             long startSample = (long)chunkIndex * GenSize;
-            long readStart = startSample - Trim; // UVR5 left padding
+            long readStart = startSample - Trim;
             
             long fileStart = Math.Max(0, readStart);
             int trimStart = (int)(fileStart - readStart); 
-            
-            float[] left = new float[ChunkSize];
-            float[] right = new float[ChunkSize];
 
-            // 1. Safe Float Extraction
             using (var reader = new AudioFileReader(wavFilePath))
             {
                 long fileTotalPerChannel = reader.Length / reader.WaveFormat.BlockAlign;
@@ -79,29 +105,27 @@ namespace VocalPure.Services
                 if (fileSamplesToRead > 0)
                 {
                     reader.Position = fileStart * reader.WaveFormat.BlockAlign;
-                    float[] buffer = new float[fileSamplesToRead * _channels];
-                    int floatsRead = reader.Read(buffer, 0, buffer.Length);
+                    int floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
                     
                     int validSamples = floatsRead / _channels;
                     for (int i = 0; i < validSamples; i++)
                     {
-                        left[trimStart + i] = buffer[i * _channels];
-                        right[trimStart + i] = _channels > 1 ? buffer[i * _channels + 1] : buffer[i * _channels];
+                        _leftBuf[trimStart + i] = _readBuffer[i * _channels];
+                        _rightBuf[trimStart + i] = _channels > 1 ? _readBuffer[i * _channels + 1] : _readBuffer[i * _channels];
                     }
                 }
             }
 
-            // 2. Prepare PyTorch Tensor: [0: LeftReal, 1: LeftImag, 2: RightReal, 3: RightImag]
-            float[] tensorData = new float[4 * FreqBins * TimeFrames];
-            Complex32[] complexBuffer = new Complex32[FftSize];
+            // OPTIMIZATION: Process Left and Right channels on separate CPU cores simultaneously
+            Parallel.Invoke(
+                () => ProcessStftChannel(_leftBuf, _tensorData, 0, 1, _leftComplexBuf),
+                () => ProcessStftChannel(_rightBuf, _tensorData, 2, 3, _rightComplexBuf)
+            );
 
-            ProcessStftChannel(left, tensorData, 0, 1, complexBuffer);
-            ProcessStftChannel(right, tensorData, 2, 3, complexBuffer);
-
-            return tensorData;
+            return _tensorData;
         }
 
-        private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
+        private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realIdx, int imagIdx, Complex32[] complexBuf)
         {
             for (int t = 0; t < TimeFrames; t++)
             {
@@ -109,18 +133,18 @@ namespace VocalPure.Services
                 
                 for (int i = 0; i < FftSize; i++)
                 {
-                    complexBuffer[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
+                    complexBuf[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
                 }
 
-                Fourier.Forward(complexBuffer, FourierOptions.Matlab);
+                Fourier.Forward(complexBuf, FourierOptions.Matlab);
 
                 for (int freq = 0; freq < FreqBins; freq++)
                 {
-                    int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
-                    int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    int rLoc = (realIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    int iLoc = (imagIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
 
-                    tensorData[rIdx] = complexBuffer[freq].Real;
-                    tensorData[iIdx] = complexBuffer[freq].Imaginary;
+                    tensorData[rLoc] = complexBuf[freq].Real;
+                    tensorData[iLoc] = complexBuf[freq].Imaginary;
                 }
             }
         }
@@ -129,61 +153,62 @@ namespace VocalPure.Services
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
-            float[] leftOut = new float[ChunkSize];
-            float[] rightOut = new float[ChunkSize];
-            float[] windowSum = new float[ChunkSize];
-            Complex32[] complexBuffer = new Complex32[FftSize];
+            Array.Clear(_leftOutBuf, 0, ChunkSize);
+            Array.Clear(_rightOutBuf, 0, ChunkSize);
+            Array.Clear(_leftWindowSum, 0, ChunkSize);
+            Array.Clear(_rightWindowSum, 0, ChunkSize);
 
-            ProcessIstftChannel(tensorData, leftOut, windowSum, 0, 1, complexBuffer);
-            ProcessIstftChannel(tensorData, rightOut, null, 2, 3, complexBuffer);
+            // OPTIMIZATION: Inverse process channels simultaneously
+            Parallel.Invoke(
+                () => ProcessIstftChannel(tensorData, _leftOutBuf, _leftWindowSum, 0, 1, _leftComplexBuf),
+                () => ProcessIstftChannel(tensorData, _rightOutBuf, _rightWindowSum, 2, 3, _rightComplexBuf)
+            );
 
-            float[] finalChunk = new float[ChunkSize * _channels];
             for (int i = 0; i < ChunkSize; i++)
             {
-                // NOLA Reconstruction matching torch.istft
-                float norm = windowSum[i] > 1e-7f ? windowSum[i] : 1f;
-                finalChunk[i * 2] = leftOut[i] / norm;
-                finalChunk[i * 2 + 1] = rightOut[i] / norm;
+                float normL = _leftWindowSum[i] > 1e-7f ? _leftWindowSum[i] : 1f;
+                float normR = _rightWindowSum[i] > 1e-7f ? _rightWindowSum[i] : 1f;
+                
+                _finalChunkBuf[i * 2] = _leftOutBuf[i] / normL;
+                _finalChunkBuf[i * 2 + 1] = _rightOutBuf[i] / normR;
             }
 
-            return finalChunk;
+            return _finalChunkBuf;
         }
 
-        private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[]? windowSum, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
+        private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[] windowSum, int realIdx, int imagIdx, Complex32[] complexBuf)
         {
             for (int t = 0; t < TimeFrames; t++)
             {
                 for (int freq = 0; freq < FreqBins; freq++)
                 {
-                    int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
-                    int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
-                    complexBuffer[freq] = new Complex32(tensorData[rIdx], tensorData[iIdx]);
+                    int rLoc = (realIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    int iLoc = (imagIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    complexBuf[freq] = new Complex32(tensorData[rLoc], tensorData[iLoc]);
                 }
 
-                complexBuffer[FreqBins] = Complex32.Zero; // Nyquist pad
+                complexBuf[FreqBins] = Complex32.Zero;
 
                 for (int f = 1; f < FftSize / 2; f++)
                 {
-                    complexBuffer[FftSize - f] = new Complex32(complexBuffer[f].Real, -complexBuffer[f].Imaginary);
+                    complexBuf[FftSize - f] = new Complex32(complexBuf[f].Real, -complexBuf[f].Imaginary);
                 }
 
-                Fourier.Inverse(complexBuffer, FourierOptions.Matlab);
+                Fourier.Inverse(complexBuf, FourierOptions.Matlab);
 
                 int offset = t * HopSize;
                 for (int i = 0; i < FftSize; i++)
                 {
-                    channelOut[offset + i] += complexBuffer[i].Real * _window[i];
-                    if (windowSum != null) windowSum[offset + i] += _window[i] * _window[i];
+                    channelOut[offset + i] += complexBuf[i].Real * _window[i];
+                    windowSum[offset + i] += _window[i] * _window[i];
                 }
             }
         }
 
         public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, ref long writePosition)
         {
-            // UVR5 Strip Logic: Drop the padded edges that contain U-Net artifacts
             int trimSamples = Trim * _channels;
             int validLength = GenSize * _channels;
-
             int copyLength = Math.Min(validLength, resultBuffer.Length - (int)writePosition);
             
             if (copyLength > 0)
