@@ -13,8 +13,8 @@ namespace VocalPure.Services
 {
     /// <summary>
     /// ONNX Runtime inference engine for MDX-Net vocal separation.
-    /// Handles execution provider selection (DirectML > OpenVINO > CPU),
-    /// chunk-based processing for memory efficiency, and tensor management.
+    /// Handles execution provider selection (DirectML > OpenVINO > CPU)
+    /// and feeds STFT spectrogram data to the neural network.
     /// </summary>
     public sealed class InferenceEngine : IDisposable
     {
@@ -60,21 +60,17 @@ namespace VocalPure.Services
         /// <summary>
         /// Loads an ONNX model with the best available execution provider.
         /// </summary>
-        /// <param name="modelPath">Path to the .onnx model file.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
         private void LoadModel(string modelPath, CancellationToken cancellationToken)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Reuse existing session if same model
             if (_session != null && _currentModelPath == modelPath)
             {
                 Log.Debug("Model {ModelPath} is already loaded. Reusing session.", modelPath);
                 return;
             }
 
-            // Dispose existing session
             _session?.Dispose();
             _session = null;
             _currentModelPath = null;
@@ -87,7 +83,6 @@ namespace VocalPure.Services
 
             Log.Information("Loading ONNX Model: {ModelPath}", Path.GetFileName(modelPath));
 
-            // Build session options with execution provider priority
             var sessionOptions = new SessionOptions
             {
                 LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
@@ -104,8 +99,7 @@ namespace VocalPure.Services
                 {
                     try
                     {
-                        // DirectML GPU acceleration
-                        opts.AppendExecutionProvider_DML(0); // GPU device 0
+                        opts.AppendExecutionProvider_DML(0); 
                     }
                     catch (Exception ex)
                     {
@@ -117,7 +111,6 @@ namespace VocalPure.Services
                 {
                     try
                     {
-                        // OpenVINO for Intel GPUs/VPUs
                         opts.AppendExecutionProvider_OpenVINO("GPU_FP16");
                     }
                     catch (Exception ex)
@@ -128,7 +121,7 @@ namespace VocalPure.Services
                 })),
                 ("CPU", new Action<SessionOptions>(opts =>
                 {
-                    // CPU is the default fallback - no configuration needed
+                    // CPU fallback
                 }))
             };
 
@@ -145,28 +138,21 @@ namespace VocalPure.Services
                     configure(testOptions);
 
                     Log.Debug("Attempting to load model with {ProviderName}...", providerName);
-                    
-                    // Test-load the model
                     _session = new InferenceSession(modelPath, testOptions);
                     _currentModelPath = modelPath;
                     _activeExecutionProvider = providerName;
 
                     Log.Information("Successfully initialized model using {ProviderName} execution provider.", providerName);
-                    
-                    // Verify model metadata
                     ValidateModelMetadata();
-
                     return;
                 }
                 catch (Exception ex) when (providerName != "CPU")
                 {
                     lastException = ex;
-                    // Try next provider
                     continue;
                 }
             }
 
-            // If we get here, all providers failed
             throw new InvalidOperationException(
                 "Failed to initialize any ONNX execution provider. " +
                 "Ensure Visual C++ Redistributables are installed." +
@@ -175,7 +161,7 @@ namespace VocalPure.Services
 
         /// <summary>
         /// Performs vocal separation on an audio file using the MDX-Net ONNX model.
-        /// Processes audio in chunks to prevent OutOfMemoryException.
+        /// Processes STFT spectrograms in precise 6.06-second chunks.
         /// </summary>
         public async Task SeparateVocalsAsync(
             string inputWavPath,
@@ -191,65 +177,46 @@ namespace VocalPure.Services
             progress?.Report((0, 0, 0, "Loading model..."));
             await Task.Run(() => LoadModel(modelPath, cancellationToken), cancellationToken);
 
-            // Get model input info
             var inputMetadata = _session!.InputMetadata;
             var outputMetadata = _session.OutputMetadata;
 
             string inputName = inputMetadata.Keys.First();
             string outputName = outputMetadata.Keys.First();
 
-            // Parse expected input shape
-            int[] inputShape = inputMetadata[inputName].Dimensions;
-            long modelSampleSize = inputShape[inputShape.Length - 1]; // Last dimension is typically sample count
-
-            // Phase 2: Chunk and process audio
-            using var chunker = new AudioChunker(
-                _settings.SampleRate,
-                _settings.Channels,
-                _settings.ChunkDurationSeconds,
-                _settings.OverlapSeconds);
+            using var chunker = new AudioChunker(_settings.SampleRate, _settings.Channels);
 
             long totalSamples = chunker.GetTotalSamples(inputWavPath);
             int totalChunks = chunker.GetChunkCount(totalSamples);
 
-            Log.Information("Starting inference. Total Samples: {TotalSamples}, Total Chunks: {TotalChunks}", totalSamples, totalChunks);
+            Log.Information("Starting frequency-domain inference. Total Samples: {TotalSamples}, Total Chunks: {TotalChunks}", totalSamples, totalChunks);
             progress?.Report((0, 0, totalChunks, _activeExecutionProvider));
 
-            // FIX 1 (RAM Time Bomb): Allocate the massive stitched array exactly ONCE
+            // Pre-allocate the final output array to stream directly into
             float[] finalStitchedOutput = new float[totalSamples];
             long writePosition = 0;
-
-            // FIX 2 (LOH Fragmentation): Pre-allocate large buffers once to reuse
-            // BUG FIX: Using _settings.Channels instead of the missing chunker.Channels
-            int maxBufferSize = chunker.SamplesPerChunk * _settings.Channels * 3; // Safety margin
-            float[] paddedBuffer = new float[maxBufferSize];
-            float[] planarBuffer = new float[maxBufferSize];
-            float[] interleavedBuffer = new float[maxBufferSize];
 
             for (int i = 0; i < totalChunks; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
                 progress?.Report(((double)i / totalChunks, i + 1, totalChunks, _activeExecutionProvider));
 
-                // Read chunk from file
-                float[] chunk = await Task.Run(() => chunker.ReadChunk(inputWavPath, i), cancellationToken);
+                // 1. STFT: Read audio and transform to Complex Spectrogram Tensor
+                float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(inputWavPath, i), cancellationToken);
 
-                // Run inference on this chunk
-                float[] outputChunk = await Task.Run(() =>
+                // 2. Inference: Process the spectrogram through MDX-Net
+                float[] outputTensorData = await Task.Run(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    // Pass reusable buffers to prevent LOH allocations
-                    return RunInference(chunk, inputName, outputName, paddedBuffer, planarBuffer, interleavedBuffer);
+                    return RunInference(tensorData, inputName, outputName);
                 }, cancellationToken);
 
-                // Apply crossfade windowing
-                chunker.ApplyWindow(outputChunk, i, totalChunks);
+                // 3. ISTFT: Transform the separated vocal spectrogram back into audio
+                float[] audioChunk = await Task.Run(() => chunker.InverseTransformAndStitch(outputTensorData), cancellationToken);
 
-                // Stream directly to the massive array, abandoning the small chunk
-                chunker.WriteChunkToBuffer(finalStitchedOutput, outputChunk, i, totalChunks, ref writePosition);
+                // 4. Stream to Buffer: Append perfectly aligned audio
+                chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
 
-                // Force GC to clear the small abandoned objects before the next massive chunk
+                // Force GC to clear the large 12MB tensor arrays used during this pass
                 if (i % 3 == 0)
                 {
                     GC.Collect(0, GCCollectionMode.Optimized);
@@ -259,144 +226,32 @@ namespace VocalPure.Services
             Log.Information("Inference complete. Writing output WAV to disk.");
             progress?.Report((0.95, totalChunks, totalChunks, _activeExecutionProvider));
 
-            // Phase 3: Write output directly to disk
             chunker.WriteWavFile(outputVocalsPath, finalStitchedOutput);
 
             progress?.Report((1.0, totalChunks, totalChunks, _activeExecutionProvider));
         }
 
         /// <summary>
-        /// Runs a single inference pass on an audio chunk using pre-allocated buffers.
+        /// Runs a single inference pass expecting the strict [1, 4, 3072, 256] shape.
         /// </summary>
-        private float[] RunInference(
-            float[] audioChunk, 
-            string inputName, 
-            string outputName, 
-            float[] paddedBuffer, 
-            float[] planarBuffer, 
-            float[] interleavedBuffer)
+        private float[] RunInference(float[] tensorData, string inputName, string outputName)
         {
             if (_session == null) throw new InvalidOperationException("Model not loaded.");
 
-            // Prepare input tensor with correct shape
-            var inputMetadata = _session.InputMetadata[inputName];
-            int[] expectedDims = inputMetadata.Dimensions;
+            // MDX-Net strict frequency-domain shape: [Batch, Channels, FreqBins, TimeFrames]
+            int[] shape = new[] { 1, 4, 3072, 256 };
+            
+            var inputTensor = new DenseTensor<float>(tensorData, shape);
 
-            // Create tensor with correct shape
-            Tensor<float> inputTensor;
-            int[] actualShape;
-
-            if (expectedDims.Length == 3)
-            {
-                // Shape: (batch=1, channels=2, samples)
-                int channelDim = expectedDims[1] == -1 ? _settings.Channels : expectedDims[1];
-                long sampleDim = expectedDims[2] == -1 ? audioChunk.Length / channelDim : expectedDims[2];
-
-                actualShape = new[] { 1, channelDim, (int)sampleDim };
-                int requiredLength = (int)(channelDim * sampleDim);
-
-                // Reusing paddedBuffer instead of allocating a new array
-                Array.Clear(paddedBuffer, 0, requiredLength);
-                Array.Copy(audioChunk, 0, paddedBuffer, 0, Math.Min(audioChunk.Length, requiredLength));
-
-                // Reusing planarBuffer instead of allocating a new array
-                InterleavedToPlanar(paddedBuffer, planarBuffer, channelDim, requiredLength);
-
-                inputTensor = new DenseTensor<float>(planarBuffer.AsMemory(0, requiredLength), actualShape);
-            }
-            else if (expectedDims.Length == 2)
-            {
-                // Shape: (batch=1, samples)
-                long sampleDim = expectedDims[1] == -1 ? audioChunk.Length : expectedDims[1];
-                actualShape = new[] { 1, (int)sampleDim };
-                int requiredLength = (int)sampleDim;
-
-                // Reusing paddedBuffer
-                Array.Clear(paddedBuffer, 0, requiredLength);
-                Array.Copy(audioChunk, 0, paddedBuffer, 0, Math.Min(audioChunk.Length, requiredLength));
-
-                inputTensor = new DenseTensor<float>(paddedBuffer.AsMemory(0, requiredLength), actualShape);
-            }
-            else
-            {
-                // Fallback: 1D tensor
-                actualShape = new[] { audioChunk.Length };
-                inputTensor = new DenseTensor<float>(audioChunk, actualShape);
-            }
-
-            // Create input container
             var inputs = new List<NamedOnnxValue>
             {
                 NamedOnnxValue.CreateFromTensor(inputName, inputTensor)
             };
 
-            // Run inference
             using var results = _session.Run(inputs);
             var outputTensor = results.First(r => r.Name == outputName).AsTensor<float>();
 
-            // Extract output data
-            float[] rawOutput = outputTensor.ToArray();
-
-            // If output is planar (channels, samples), convert back to interleaved
-            if (expectedDims.Length == 3 && _settings.Channels == 2)
-            {
-                // Reusing interleavedBuffer
-                PlanarToInterleaved(rawOutput, interleavedBuffer, outputTensor.Dimensions);
-                
-                float[] finalChunk = new float[audioChunk.Length];
-                Array.Copy(interleavedBuffer, 0, finalChunk, 0, audioChunk.Length);
-                return finalChunk;
-            }
-            else
-            {
-                float[] finalChunk = new float[audioChunk.Length];
-                Array.Copy(rawOutput, 0, finalChunk, 0, Math.Min(rawOutput.Length, audioChunk.Length));
-                return finalChunk;
-            }
-        }
-
-        /// <summary>
-        /// Converts interleaved audio (L,R,L,R) to planar format (L...,R...) into a pre-allocated buffer.
-        /// </summary>
-        private static void InterleavedToPlanar(float[] interleaved, float[] planar, int channels, int requiredLength)
-        {
-            int samplesPerChannel = requiredLength / channels;
-            for (int ch = 0; ch < channels; ch++)
-            {
-                for (int s = 0; s < samplesPerChannel; s++)
-                {
-                    planar[ch * samplesPerChannel + s] = interleaved[s * channels + ch];
-                }
-            }
-        }
-
-        /// <summary>
-        /// Converts planar audio (L...,R...) back to interleaved format (L,R,L,R) into a pre-allocated buffer.
-        /// </summary>
-        private static void PlanarToInterleaved(float[] planar, float[] interleaved, ReadOnlySpan<int> outputShape)
-        {
-            if (outputShape.Length < 3) 
-            {
-                Array.Copy(planar, interleaved, planar.Length);
-                return;
-            }
-
-            int batchSize = outputShape[0];
-            int channels = outputShape[1];
-            int samplesPerChannel = outputShape[2];
-
-            for (int b = 0; b < batchSize; b++)
-            {
-                for (int ch = 0; ch < channels; ch++)
-                {
-                    for (int s = 0; s < samplesPerChannel; s++)
-                    {
-                        int planarIdx = b * channels * samplesPerChannel + ch * samplesPerChannel + s;
-                        int interleavedIdx = b * channels * samplesPerChannel + s * channels + ch;
-                        interleaved[interleavedIdx] = planar[planarIdx];
-                    }
-                }
-            }
+            return outputTensor.ToArray();
         }
 
         /// <summary>
@@ -410,15 +265,7 @@ namespace VocalPure.Services
             {
                 var modelMetadata = _session.ModelMetadata;
                 var inputMetadata = _session.InputMetadata;
-                var outputMetadata = _session.OutputMetadata;
-
-                if (inputMetadata.Count == 0)
-                    throw new InvalidOperationException("Model has no input nodes.");
-
-                if (outputMetadata.Count == 0)
-                    throw new InvalidOperationException("Model has no output nodes.");
-
-                // Log model info for debugging
+                
                 Log.Debug("Model loaded: {Description} | Producer: {ProducerName} | Version: {Version}", 
                     modelMetadata.Description, modelMetadata.ProducerName, modelMetadata.Version);
 
