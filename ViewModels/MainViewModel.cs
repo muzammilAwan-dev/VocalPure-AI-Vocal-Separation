@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic; // FIX: Added missing namespace for EqualityComparer
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -53,6 +53,7 @@ namespace VocalPure.ViewModels
             JobQueue = new ObservableCollection<SeparationJob>();
 
             BrowseCommand = new RelayCommand(OnBrowse);
+            StartProcessingCommand = new RelayCommand(OnStartProcessing, () => !IsProcessing && JobQueue.Any(j => j.Phase == ProcessingPhase.Idle));
             CancelCommand = new RelayCommand(OnCancel, () => IsProcessing);
             ClearCompletedCommand = new RelayCommand(OnClearCompleted, () => JobQueue.Any(j => j.IsTerminal));
             OpenOutputFolderCommand = new RelayCommand<string>(OnOpenOutputFolder);
@@ -75,6 +76,7 @@ namespace VocalPure.ViewModels
                 if (SetProperty(ref _isProcessing, value))
                 {
                     CancelCommand.RaiseCanExecuteChanged();
+                    StartProcessingCommand.RaiseCanExecuteChanged();
                 }
             }
         }
@@ -126,6 +128,7 @@ namespace VocalPure.ViewModels
         #region Commands
 
         public RelayCommand BrowseCommand { get; }
+        public RelayCommand StartProcessingCommand { get; }
         public RelayCommand CancelCommand { get; }
         public RelayCommand ClearCompletedCommand { get; }
         public RelayCommand<string> OpenOutputFolderCommand { get; }
@@ -195,11 +198,10 @@ namespace VocalPure.ViewModels
                 }
             }
 
-            // Auto-start processing if not already running
-            if (!IsProcessing && JobQueue.Any(j => j.Phase == ProcessingPhase.Idle))
-            {
-                await ProcessNextJobAsync();
-            }
+            // Enable the Start Processing button now that items are queued
+            StartProcessingCommand.RaiseCanExecuteChanged();
+            
+            await Task.CompletedTask;
         }
 
         /// <summary>
@@ -229,6 +231,17 @@ namespace VocalPure.ViewModels
         #endregion
 
         #region Processing Pipeline
+
+        /// <summary>
+        /// Starts processing the queue when the user clicks the Start button.
+        /// </summary>
+        private void OnStartProcessing()
+        {
+            if (!IsProcessing && JobQueue.Any(j => j.Phase == ProcessingPhase.Idle))
+            {
+                _ = ProcessNextJobAsync();
+            }
+        }
 
         /// <summary>
         /// Processes the next queued job with full cancellation support.
@@ -368,6 +381,7 @@ namespace VocalPure.ViewModels
                 _currentCts = null;
 
                 ClearCompletedCommand.RaiseCanExecuteChanged();
+                StartProcessingCommand.RaiseCanExecuteChanged();
 
                 // Process next job if available
                 if (JobQueue.Any(j => j.Phase == ProcessingPhase.Idle))
