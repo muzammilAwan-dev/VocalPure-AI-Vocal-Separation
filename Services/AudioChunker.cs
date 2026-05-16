@@ -1,242 +1,194 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using NAudio.Wave;
+using NWaves.Transforms;
+using NWaves.Windows;
 
 namespace VocalPure.Services
 {
     /// <summary>
-    /// Handles memory-efficient audio chunking for large files.
-    /// Splits Float32 PCM WAV audio into overlapping chunks suitable for ONNX model inference,
-    /// then stitches results back together using Hann window crossfading to eliminate boundary artifacts.
+    /// Advanced STFT Audio Processor for MDX-Net.
+    /// Converts time-domain audio waveforms into 4D complex spectrogram tensors 
+    /// and mathematically reconstructs the audio via ISTFT after neural network inference.
     /// </summary>
     public sealed class AudioChunker : IDisposable
     {
         private readonly int _sampleRate;
         private readonly int _channels;
-        private readonly int _chunkDurationSeconds;
-        private readonly int _overlapSeconds;
-        private readonly int _chunkSize;
-        private readonly int _overlapSize;
-        private readonly int _hopSize;
-        private readonly float[] _hannWindow;
         private bool _isDisposed;
 
-        /// <summary>
-        /// Number of samples per channel in each chunk (excluding overlap).</summary>
-        public int SamplesPerChunk => _chunkSize / _channels;
+        // MDX-Net Strict Mathematical Constants
+        private const int FftSize = 6144;
+        private const int HopSize = 1024;
+        private const int TimeFrames = 256;
+        private const int FreqBins = 3072; // (FftSize / 2) - discarded Nyquist bin
+        
+        // Exactly 267,264 samples per chunk (6.06 seconds)
+        public const int RequiredSamples = (TimeFrames - 1) * HopSize + FftSize; 
 
-        /// <summary>
-        /// Number of overlapping samples per channel on each side.</summary>
-        public int OverlapSamples => _overlapSize / _channels;
+        private readonly Stft _stft;
 
-        /// <summary>
-        /// Number of samples to hop between chunk starts.</summary>
-        public int HopSamples => _hopSize / _channels;
-
-        public AudioChunker(
-            int sampleRate = 44100,
-            int channels = 2,
-            int chunkDurationSeconds = 30,
-            int overlapSeconds = 1)
+        public AudioChunker(int sampleRate = 44100, int channels = 2)
         {
             _sampleRate = sampleRate;
             _channels = channels;
-            _chunkDurationSeconds = chunkDurationSeconds;
-            _overlapSeconds = overlapSeconds;
-
-            // Calculate sizes in total float samples (interleaved channels)
-            _chunkSize = chunkDurationSeconds * sampleRate * channels;
-            _overlapSize = overlapSeconds * sampleRate * channels;
-            _hopSize = _chunkSize - (_overlapSize * 2);
-
-            if (_hopSize <= 0)
-                throw new ArgumentException("Overlap is too large for chunk size. Reduce overlap or increase chunk duration.");
-
-            // Pre-compute Hann window for crossfading
-            _hannWindow = CreateHannWindow(_overlapSize);
+            
+            // Initialize STFT with Hann window exactly as MDX-Net expects
+            _stft = new Stft(FftSize, HopSize, WindowType.Hann);
         }
 
-        /// <summary>
-        /// Reads a WAV file and returns the total number of float samples (interleaved).
-        /// </summary>
         public long GetTotalSamples(string wavFilePath)
         {
             using var reader = new WaveFileReader(wavFilePath);
-            ValidateFormat(reader);
-            long sampleCount = reader.Length / sizeof(float);
-            return sampleCount;
+            return reader.Length / sizeof(float);
         }
 
-        /// <summary>
-        /// Gets the total number of chunks needed for a given sample count.
-        /// </summary>
         public int GetChunkCount(long totalSamples)
         {
-            if (totalSamples <= _chunkSize)
-                return 1;
-
-            // Account for overlap: effective samples per chunk = hop size
-            long effectiveSamples = totalSamples - (_overlapSize * 2);
-            if (effectiveSamples <= 0) return 1;
-
-            return (int)Math.Ceiling((double)effectiveSamples / _hopSize) + 1;
+            long samplesPerChannel = totalSamples / _channels;
+            return (int)Math.Ceiling((double)samplesPerChannel / RequiredSamples);
         }
 
         /// <summary>
-        /// Reads a specific chunk of audio data from a WAV file.
+        /// Reads a precise chunk of audio, separates left/right channels, 
+        /// applies STFT, and packs it into a flat array for the [1, 4, 3072, 256] Tensor.
         /// </summary>
-        /// <param name="wavFilePath">Source WAV file path.</param>
-        /// <param name="chunkIndex">Zero-based chunk index.</param>
-        /// <returns>Float array of interleaved audio samples with overlap regions.</returns>
-        public float[] ReadChunk(string wavFilePath, int chunkIndex)
+        public float[] ReadAndTransformChunk(string wavFilePath, int chunkIndex)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
             long totalSamples = GetTotalSamples(wavFilePath);
+            long startSample = (long)chunkIndex * RequiredSamples * _channels;
+            
+            float[] rawChunk = new float[RequiredSamples * _channels];
 
-            if (totalSamples <= _chunkSize)
+            using (var reader = new WaveFileReader(wavFilePath))
             {
-                // File fits in single chunk
-                return ReadAllSamples(wavFilePath);
-            }
-
-            // Calculate the start position in the file (in samples, accounting for overlap)
-            long chunkStartSample = (long)chunkIndex * _hopSize;
-            long readStart = Math.Max(0, chunkStartSample - _overlapSize);
-            long readEnd = Math.Min(totalSamples, chunkStartSample + _hopSize + _overlapSize);
-            long readCount = readEnd - readStart;
-
-            // Pad if this is the first or last chunk
-            long paddedStartOffset = 0;
-            if (chunkIndex == 0)
-            {
-                // First chunk: pad at start with zeros if needed
-                paddedStartOffset = _overlapSize;
-                readCount += paddedStartOffset;
-            }
-
-            // Ensure last chunk has full size with padding
-            if (readEnd >= totalSamples && readCount < _chunkSize)
-            {
-                readCount = _chunkSize;
-            }
-
-            var chunk = new float[readCount];
-
-            using var reader = new WaveFileReader(wavFilePath);
-            ValidateFormat(reader);
-
-            // Skip to read position (in bytes)
-            long bytePosition = readStart * sizeof(float);
-            reader.Position = Math.Min(bytePosition, reader.Length);
-
-            // Read samples
-            int samplesToRead = (int)Math.Min(readCount - paddedStartOffset,
-                (totalSamples - (reader.Position / sizeof(float))));
-
-            if (samplesToRead > 0)
-            {
-                byte[] buffer = new byte[samplesToRead * sizeof(float)];
-                int bytesRead = reader.Read(buffer, 0, buffer.Length);
-                int samplesRead = bytesRead / sizeof(float);
-
-                Buffer.BlockCopy(buffer, 0, chunk, (int)paddedStartOffset * sizeof(float), samplesRead * sizeof(float));
-            }
-
-            return chunk;
-        }
-
-        /// <summary>
-        /// Applies crossfade windowing to chunk boundaries for smooth stitching.
-        /// Modifies the chunk in-place for the overlap regions.
-        /// </summary>
-        /// <param name="chunk">The audio chunk to window.</param>
-        /// <param name="chunkIndex">Index of this chunk.</param>
-        /// <param name="totalChunks">Total number of chunks.</param>
-        public void ApplyWindow(float[] chunk, int chunkIndex, int totalChunks)
-        {
-            if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
-            if (chunk.Length < _overlapSize * 2) return; // Too small to window
-
-            // Fade-in at the beginning (except for first chunk)
-            if (chunkIndex > 0)
-            {
-                for (int i = 0; i < _overlapSize; i++)
+                long bytePosition = startSample * sizeof(float);
+                if (bytePosition < reader.Length)
                 {
-                    chunk[i] *= _hannWindow[i]; // Rising half of Hann
+                    reader.Position = bytePosition;
+                    byte[] buffer = new byte[rawChunk.Length * sizeof(float)];
+                    int bytesRead = reader.Read(buffer, 0, buffer.Length);
+                    Buffer.BlockCopy(buffer, 0, rawChunk, 0, bytesRead);
                 }
             }
 
-            // Fade-out at the end (except for last chunk)
-            if (chunkIndex < totalChunks - 1)
+            // Split Interleaved to Left/Right
+            float[] left = new float[RequiredSamples];
+            float[] right = new float[RequiredSamples];
+            for (int i = 0; i < RequiredSamples; i++)
             {
-                int fadeStart = chunk.Length - _overlapSize;
-                for (int i = 0; i < _overlapSize; i++)
+                left[i] = rawChunk[i * 2];
+                right[i] = rawChunk[i * 2 + 1];
+            }
+
+            // Execute STFT
+            var leftSpectrogram = _stft.Direct(left);
+            var rightSpectrogram = _stft.Direct(right);
+
+            // Pack into [4, 3072, 256] flat array
+            // 4 Channels: [LeftReal, LeftImag, RightReal, RightImag]
+            float[] tensorData = new float[4 * FreqBins * TimeFrames];
+            
+            for (int time = 0; time < TimeFrames; time++)
+            {
+                for (int freq = 0; freq < FreqBins; freq++)
                 {
-                    int idx = fadeStart + i;
-                    if (idx < chunk.Length)
+                    // The NWaves STFT outputs a list of float[] where each array is a timeframe
+                    // containing [real0, imag0, real1, imag1...]
+                    int cplxIdx = freq * 2;
+                    
+                    int lrIdx = (0 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int liIdx = (1 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int riIdx = (3 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+
+                    // Ensure we don't go out of bounds on the final partial timeframe
+                    if (time < leftSpectrogram.Count)
                     {
-                        // Falling half of Hann
-                        chunk[idx] *= _hannWindow[_overlapSize - 1 - i];
+                        tensorData[lrIdx] = leftSpectrogram[time][cplxIdx];       // Left Real
+                        tensorData[liIdx] = leftSpectrogram[time][cplxIdx + 1];   // Left Imag
+                        tensorData[rrIdx] = rightSpectrogram[time][cplxIdx];      // Right Real
+                        tensorData[riIdx] = rightSpectrogram[time][cplxIdx + 1];  // Right Imag
                     }
                 }
             }
+
+            return tensorData;
         }
 
         /// <summary>
-        /// FIX: Streams a single processed chunk directly into the pre-allocated output array.
-        /// This prevents holding all chunks in RAM simultaneously.
+        /// Takes the 4D Tensor output from the neural network, unpacks it, 
+        /// reattaches the Nyquist bin, applies ISTFT, and interleaves it back to audio.
         /// </summary>
-        public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, int totalChunks, ref long writePosition)
+        public float[] InverseTransformAndStitch(float[] tensorData)
         {
-            if (totalChunks == 1)
-            {
-                Array.Copy(chunk, 0, resultBuffer, 0, Math.Min(chunk.Length, resultBuffer.Length));
-                return;
-            }
+            if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
-            if (chunkIndex == 0)
-            {
-                // First chunk: write everything except trailing overlap
-                int writeLength = chunk.Length - _overlapSize;
-                Array.Copy(chunk, 0, resultBuffer, 0, writeLength);
-                writePosition = writeLength;
-            }
-            else if (chunkIndex == totalChunks - 1)
-            {
-                // Last chunk: write starting from overlap (adds to existing data)
-                int startIdx = _overlapSize;
-                int writeLength = (int)Math.Min(chunk.Length - startIdx, resultBuffer.Length - writePosition);
+            var leftSpectrogram = new List<float[]>();
+            var rightSpectrogram = new List<float[]>();
 
-                for (int j = 0; j < writeLength; j++)
+            for (int time = 0; time < TimeFrames; time++)
+            {
+                // Note: NWaves expects the array size to be FftSize + 2 (to hold the Nyquist bin)
+                float[] leftFrame = new float[FftSize + 2];
+                float[] rightFrame = new float[FftSize + 2];
+
+                for (int freq = 0; freq < FreqBins; freq++)
                 {
-                    int destIdx = (int)(writePosition + j);
-                    if (destIdx < resultBuffer.Length)
-                        resultBuffer[destIdx] += chunk[startIdx + j];
-                }
-            }
-            else
-            {
-                // Middle chunk: add overlap region, write non-overlap
-                // Add the leading overlap to existing data
-                for (int j = 0; j < _overlapSize && writePosition - _overlapSize + j >= 0; j++)
-                {
-                    int destIdx = (int)(writePosition - _overlapSize + j);
-                    if (destIdx >= 0 && destIdx < resultBuffer.Length)
-                        resultBuffer[destIdx] += chunk[j];
-                }
+                    int lrIdx = (0 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int liIdx = (1 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+                    int riIdx = (3 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
 
-                // Write the non-overlapping portion
-                int startIdx = _overlapSize;
-                int writeLength = chunk.Length - (_overlapSize * 2);
-                Array.Copy(chunk, startIdx, resultBuffer, writePosition, writeLength);
-                writePosition += writeLength;
+                    int cplxIdx = freq * 2;
+                    leftFrame[cplxIdx] = tensorData[lrIdx];
+                    leftFrame[cplxIdx + 1] = tensorData[liIdx];
+                    rightFrame[cplxIdx] = tensorData[rrIdx];
+                    rightFrame[cplxIdx + 1] = tensorData[riIdx];
+                }
+                
+                // The Nyquist bin (freq 3072) was discarded by the model. Keep it zero.
+                
+                leftSpectrogram.Add(leftFrame);
+                rightSpectrogram.Add(rightFrame);
+            }
+
+            // Execute ISTFT (Spectrogram to Audio)
+            float[] leftAudio = _stft.Inverse(leftSpectrogram);
+            float[] rightAudio = _stft.Inverse(rightSpectrogram);
+
+            // Interleave back to Stereo
+            int totalOutSamples = Math.Min(leftAudio.Length, rightAudio.Length);
+            float[] interleaved = new float[totalOutSamples * 2];
+            
+            for (int i = 0; i < totalOutSamples; i++)
+            {
+                interleaved[i * 2] = leftAudio[i];
+                interleaved[i * 2 + 1] = rightAudio[i];
+            }
+
+            // Trim to our exact RequiredSamples to strip STFT padding
+            float[] finalChunk = new float[RequiredSamples * _channels];
+            Array.Copy(interleaved, 0, finalChunk, 0, Math.Min(interleaved.Length, finalChunk.Length));
+
+            return finalChunk;
+        }
+
+        public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, ref long writePosition)
+        {
+            // Because STFT windowing reconstructs perfectly at the seams when using ISTFT, 
+            // we don't need manual overlap-add math anymore. NWaves handled it! We just stream it.
+            int copyLength = Math.Min(chunk.Length, resultBuffer.Length - (int)writePosition);
+            if (copyLength > 0)
+            {
+                Array.Copy(chunk, 0, resultBuffer, writePosition, copyLength);
+                writePosition += copyLength;
             }
         }
 
-        /// <summary>
-        /// Writes float audio data to a WAV file.
-        /// </summary>
         public void WriteWavFile(string filePath, float[] samples)
         {
             var format = new WaveFormat(_sampleRate, 32, _channels);
@@ -245,49 +197,6 @@ namespace VocalPure.Services
             byte[] byteBuffer = new byte[samples.Length * sizeof(float)];
             Buffer.BlockCopy(samples, 0, byteBuffer, 0, byteBuffer.Length);
             writer.Write(byteBuffer, 0, byteBuffer.Length);
-        }
-
-        /// <summary>
-        /// Validates that the WAV file has the expected format (Float32, 44100Hz, Stereo).
-        /// </summary>
-        private void ValidateFormat(WaveFileReader reader)
-        {
-            if (reader.WaveFormat.BitsPerSample != 32)
-                throw new InvalidOperationException($"Expected 32-bit float WAV, got {reader.WaveFormat.BitsPerSample}-bit.");
-
-            if (reader.WaveFormat.SampleRate != _sampleRate)
-                throw new InvalidOperationException($"Expected {_sampleRate}Hz, got {reader.WaveFormat.SampleRate}Hz.");
-
-            if (reader.WaveFormat.Channels != _channels)
-                throw new InvalidOperationException($"Expected {_channels} channels, got {reader.WaveFormat.Channels}.");
-        }
-
-        /// <summary>
-        /// Reads all samples from a WAV file into a float array.
-        /// </summary>
-        private static float[] ReadAllSamples(string wavFilePath)
-        {
-            using var reader = new WaveFileReader(wavFilePath);
-            byte[] buffer = new byte[reader.Length];
-            int bytesRead = reader.Read(buffer, 0, buffer.Length);
-            float[] samples = new float[bytesRead / sizeof(float)];
-            Buffer.BlockCopy(buffer, 0, samples, 0, bytesRead);
-            return samples;
-        }
-
-        /// <summary>
-        /// Creates a Hann window array for crossfading.
-        /// The first half is rising (0->1), second half is falling (1->0).
-        /// </summary>
-        private static float[] CreateHannWindow(int length)
-        {
-            var window = new float[length];
-            for (int i = 0; i < length; i++)
-            {
-                // Hann window: w(n) = 0.5 * (1 - cos(2*pi*n / (N-1)))
-                window[i] = 0.5f * (1.0f - (float)Math.Cos(2.0 * Math.PI * i / (length - 1)));
-            }
-            return window;
         }
 
         public void Dispose()
