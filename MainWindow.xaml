@@ -91,7 +91,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+        </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
                 Background="{StaticResource BackgroundSecondary}"
@@ -312,6 +312,14 @@
                 <TextBlock Text="{Binding JobQueue.Count, StringFormat='({0} jobs)'}"
                            Style="{StaticResource MutedText}"
                            VerticalAlignment="Center"/>
+                
+                <Button Content="Start Processing"
+                        Style="{StaticResource ActionButton}"
+                        FontSize="11"
+                        Padding="14,4"
+                        Margin="16,0,0,0"
+                        Command="{Binding StartProcessingCommand}"/>
+
                 <Button Content="Clear Completed"
                         Style="{StaticResource SecondaryButton}"
                         FontSize="11"
