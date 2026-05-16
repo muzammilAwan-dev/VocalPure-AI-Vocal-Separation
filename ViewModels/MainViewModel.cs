@@ -127,19 +127,14 @@ namespace VocalPure.ViewModels
             try
             {
                 EngineStatus = "Initializing engine dependencies...";
-                Log.Information("Starting engine dependency initialization...");
-                
                 await _dependencyManager.InitializeAsync();
                 bool hasGpu = await Task.Run(() => _inferenceEngine.CheckGpuAvailability());
                 GpuAvailable = hasGpu;
                 EngineStatus = hasGpu ? "Engine ready - GPU acceleration available" : "Engine ready - CPU mode";
-                    
-                Log.Information("Engine initialization complete. GPU Available: {GpuAvailable}", hasGpu);
             }
             catch (Exception ex)
             {
                 EngineStatus = $"Engine initialization failed: {ex.Message}";
-                Log.Error(ex, "Failed to initialize the dependency engine.");
                 MessageBox.Show($"Failed to initialize engine: {ex.Message}", "Initialization Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -152,7 +147,6 @@ namespace VocalPure.ViewModels
                 string ext = Path.GetExtension(path).ToLowerInvariant();
                 if (validExtensions.Contains(ext) && File.Exists(path))
                 {
-                    Log.Information("Adding file to queue: {FilePath}", path);
                     JobQueue.Add(new SeparationJob(path) { IsVideoOutput = IsVideoFile(path) });
                 }
             }
@@ -182,16 +176,10 @@ namespace VocalPure.ViewModels
                     : CustomOutputFolder
             };
 
-            if (dialog.ShowDialog() == true)
-            {
-                CustomOutputFolder = dialog.FolderName;
-            }
+            if (dialog.ShowDialog() == true) CustomOutputFolder = dialog.FolderName;
         }
 
-        private void OnResetOutputFolder()
-        {
-            CustomOutputFolder = string.Empty;
-        }
+        private void OnResetOutputFolder() => CustomOutputFolder = string.Empty;
 
         private bool IsVideoFile(string path)
         {
@@ -213,93 +201,57 @@ namespace VocalPure.ViewModels
             IsProcessing = true;
             _currentCts = new CancellationTokenSource();
             CancellationToken token = _currentCts.Token;
-            string tempDir = Path.Combine(Path.GetTempPath(), "VocalPure", job.Id);
             
-            Log.Information("Starting job ID: {JobId} for file: {FileName}", job.Id, job.FileName);
-
             try
             {
                 job.StartTime = DateTime.Now;
                 job.IsActive = true;
-                job.Phase = ProcessingPhase.Initializing;
-                job.AppendLog($"Starting processing: {job.FileName}");
                 _elapsedTimer.Start();
 
-                var progress = new Progress<(ProcessingPhase phase, double phaseProgress, string message)>(update =>
-                {
-                    job.Phase = update.phase;
-                    job.CurrentPhaseProgress = update.phaseProgress;
-                    if (!string.IsNullOrEmpty(update.message)) job.AppendLog(update.message);
-                    job.OverallProgress = CalculateOverallProgress(update.phase, update.phaseProgress);
-                });
-
-                job.Phase = ProcessingPhase.ExtractingAudio;
-                string wavPath = Path.Combine(tempDir, "input.wav");
-                Directory.CreateDirectory(tempDir);
-
-                job.AppendLog("Phase 1: Extracting audio with FFmpeg...");
-                var extractReporter = new Progress<double>(p => ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.ExtractingAudio, p, $"FFmpeg extraction: {p:P0}")));
-                await _mediaProcessor.ExtractAudioToWavAsync(job.InputFilePath, wavPath, token, extractReporter);
-                token.ThrowIfCancellationRequested();
-
-                job.Phase = ProcessingPhase.LoadingModel;
-                job.AppendLog("Phase 2: Loading ONNX model...");
-                string vocalsWavPath = Path.Combine(tempDir, "vocals.wav");
+                string outputPath = GenerateOutputPath(job);
                 string modelPath = _inferenceSettings.ModelPath;
 
                 if (!File.Exists(modelPath)) throw new FileNotFoundException($"ONNX model not found: {modelPath}");
 
-                var inferenceReporter = new Progress<(double chunkProgress, int currentChunk, int totalChunks, string executionProvider)>(update =>
+                job.Phase = ProcessingPhase.Initializing;
+                job.AppendLog($"Initiating Zero-Disk Streaming Pipeline for: {job.FileName}");
+
+                var progress = new Progress<(double chunkProgress, int currentChunk, int totalChunks, string executionProvider)>(update =>
                 {
                     job.ExecutionProvider = update.executionProvider;
+                    job.Phase = ProcessingPhase.ProcessingInference;
                     double phaseProgress = update.totalChunks > 0 ? (double)update.currentChunk / update.totalChunks : 0;
-                    ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.ProcessingInference, phaseProgress, $"Processing chunk {update.currentChunk}/{update.totalChunks} [{update.executionProvider}]"));
+                    job.CurrentPhaseProgress = phaseProgress;
+                    job.OverallProgress = phaseProgress * 0.95; // 95% of the total visual bar
+                    
+                    if (update.currentChunk == 1) job.AppendLog("Pipeline Active: Producer, AI, and Consumer threads running concurrently...");
                 });
 
-                await _inferenceEngine.SeparateVocalsAsync(wavPath, vocalsWavPath, modelPath, token, inferenceReporter);
-                token.ThrowIfCancellationRequested();
+                // THE MASTER CALL: One method handles everything concurrently.
+                await _inferenceEngine.SeparateVocalsAsync(
+                    _mediaProcessor, 
+                    job.InputFilePath, 
+                    outputPath, 
+                    job.IsVideoOutput, 
+                    modelPath, 
+                    token, 
+                    progress);
 
-                job.Phase = ProcessingPhase.MergingOutput;
-                job.AppendLog("Phase 3: Encoding final output...");
-                string outputPath = GenerateOutputPath(job);
-                
-                var mergeReporter = new Progress<double>(p => ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.MergingOutput, p, $"FFmpeg encode: {p:P0}")));
-
-                if (job.IsVideoOutput)
-                {
-                    await _mediaProcessor.MergeVideoWithAudioAsync(job.InputFilePath, vocalsWavPath, outputPath, token, mergeReporter);
-                }
-                else
-                {
-                    await _mediaProcessor.EncodeAudioAsync(vocalsWavPath, outputPath, token, mergeReporter);
-                }
-
-                // FIX: Setting this triggers the HasOutput flag, which brings up the Open button instantly.
                 job.OutputFilePath = outputPath;
-                job.AppendLog($"Output saved: {outputPath}");
-
-                job.Phase = ProcessingPhase.CleaningUp;
-                job.AppendLog("Phase 4: Cleaning up temporary files...");
-                CleanupTempDirectory(tempDir);
-
                 job.Phase = ProcessingPhase.Completed;
-                job.AppendLog("Processing completed successfully!");
-                Log.Information("Job completed successfully: {JobId}", job.Id);
+                job.OverallProgress = 1.0;
+                job.AppendLog($"Processing completed! Output saved: {outputPath}");
             }
             catch (OperationCanceledException)
             {
                 job.Phase = ProcessingPhase.Cancelled;
-                job.AppendLog("Processing cancelled.");
-                Log.Warning("Job cancelled: {JobId}", job.Id);
-                CleanupTempDirectory(tempDir);
+                job.AppendLog("Processing cancelled by user.");
             }
             catch (Exception ex)
             {
                 job.Phase = ProcessingPhase.Error;
                 job.ErrorMessage = ex.Message;
                 job.AppendLog($"ERROR: {ex.Message}");
-                Log.Error(ex, "Job failed: {JobId}", job.Id);
-                CleanupTempDirectory(tempDir);
             }
             finally
             {
@@ -310,9 +262,7 @@ namespace VocalPure.ViewModels
                 _currentCts?.Dispose();
                 _currentCts = null;
 
-                // FIXED: FORCED MEMORY RELEASE
-                // This forces the OS to immediately flush the Large Object Heap back to Windows, 
-                // crashing the RAM usage back down to a baseline footprint the second the job completes.
+                // Final aggressive system sweep
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
@@ -322,21 +272,6 @@ namespace VocalPure.ViewModels
 
                 if (JobQueue.Any(j => j.Phase == ProcessingPhase.Idle)) await ProcessNextJobAsync();
             }
-        }
-
-        private static double CalculateOverallProgress(ProcessingPhase phase, double phaseProgress)
-        {
-            return phase switch
-            {
-                ProcessingPhase.Initializing => 0.0,
-                ProcessingPhase.ExtractingAudio => 0.05 + (phaseProgress * 0.15),
-                ProcessingPhase.LoadingModel => 0.20,
-                ProcessingPhase.ProcessingInference => 0.25 + (phaseProgress * 0.55),
-                ProcessingPhase.MergingOutput => 0.80 + (phaseProgress * 0.15),
-                ProcessingPhase.CleaningUp => 0.96,
-                ProcessingPhase.Completed => 1.0,
-                _ => 0.0
-            };
         }
 
         private string GenerateOutputPath(SeparationJob job)
@@ -360,25 +295,6 @@ namespace VocalPure.ViewModels
             }
 
             return outputPath;
-        }
-
-        private static void CleanupTempDirectory(string tempDir)
-        {
-            try
-            {
-                if (Directory.Exists(tempDir))
-                {
-                    foreach (string file in Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories))
-                    {
-                        try { File.Delete(file); } catch { /* best effort */ }
-                    }
-                    Directory.Delete(tempDir, true);
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to fully clean temporary directory: {TempDir}", tempDir);
-            }
         }
 
         private void OnCancel()
@@ -415,16 +331,9 @@ namespace VocalPure.ViewModels
         {
             try
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "https://github.com/muzammilAwan-dev",
-                    UseShellExecute = true
-                });
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = "https://github.com/muzammilAwan-dev", UseShellExecute = true });
             }
-            catch (Exception ex)
-            {
-                Log.Error(ex, "Failed to open GitHub link.");
-            }
+            catch { }
         }
 
         private static void OnOpenOutputFolder(string? path)
@@ -453,10 +362,7 @@ namespace VocalPure.ViewModels
             return true;
         }
 
-        private void OnPropertyChanged([CallerMemberName] string propertyName = "")
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
+        private void OnPropertyChanged([CallerMemberName] string propertyName = "") => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         #endregion
 
         public void Dispose()
