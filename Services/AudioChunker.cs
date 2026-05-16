@@ -1,16 +1,15 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
+using MathNet.Numerics;
+using MathNet.Numerics.IntegralTransforms;
 using NAudio.Wave;
-using NWaves.Transforms;
-using NWaves.Windows;
 
 namespace VocalPure.Services
 {
     /// <summary>
-    /// Advanced STFT Audio Processor for MDX-Net.
-    /// Converts time-domain audio waveforms into 4D complex spectrogram tensors 
-    /// and mathematically reconstructs the audio via ISTFT after neural network inference.
+    /// Advanced STFT Audio Processor for MDX-Net using MathNet.Numerics.
+    /// Hand-rolled, mathematically precise STFT/ISTFT pipeline that supports 
+    /// non-power-of-2 FFTs (like 6144) without padding distortion.
     /// </summary>
     public sealed class AudioChunker : IDisposable
     {
@@ -24,26 +23,38 @@ namespace VocalPure.Services
         private const int TimeFrames = 256;
         private const int FreqBins = 3072; // (FftSize / 2) - discarded Nyquist bin
         
-        // Exactly 267,264 samples per chunk (6.06 seconds)
+        /// <summary>
+        /// Exactly 267,264 samples per chunk (6.06 seconds).
+        /// </summary>
         public const int RequiredSamples = (TimeFrames - 1) * HopSize + FftSize; 
 
-        private readonly Stft _stft;
+        private readonly float[] _window;
 
         public AudioChunker(int sampleRate = 44100, int channels = 2)
         {
             _sampleRate = sampleRate;
             _channels = channels;
             
-            // Initialize STFT with Hann window exactly as MDX-Net expects
-            _stft = new Stft(FftSize, HopSize, WindowType.Hann);
+            // Generate Hann Window
+            _window = new float[FftSize];
+            for (int i = 0; i < FftSize; i++)
+            {
+                _window[i] = 0.5f * (1.0f - (float)Math.Cos(2.0 * Math.PI * i / FftSize));
+            }
         }
 
+        /// <summary>
+        /// Reads a WAV file and returns the total number of float samples (interleaved).
+        /// </summary>
         public long GetTotalSamples(string wavFilePath)
         {
             using var reader = new WaveFileReader(wavFilePath);
             return reader.Length / sizeof(float);
         }
 
+        /// <summary>
+        /// Gets the total number of chunks needed for a given sample count.
+        /// </summary>
         public int GetChunkCount(long totalSamples)
         {
             long samplesPerChannel = totalSamples / _channels;
@@ -51,8 +62,8 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Reads a precise chunk of audio, separates left/right channels, 
-        /// applies STFT, and packs it into a flat array for the [1, 4, 3072, 256] Tensor.
+        /// Reads a precise chunk of audio, applies STFT using MathNet, 
+        /// and packs it into a flat array for the [1, 4, 3072, 256] Tensor.
         /// </summary>
         public float[] ReadAndTransformChunk(string wavFilePath, int chunkIndex)
         {
@@ -84,105 +95,126 @@ namespace VocalPure.Services
                 right[i] = rawChunk[i * 2 + 1];
             }
 
-            // Execute STFT (NWaves returns a List of Tuples: (float[] Real, float[] Imag))
-            var leftSpectrogram = _stft.Direct(left);
-            var rightSpectrogram = _stft.Direct(right);
-
-            // Pack into [4, 3072, 256] flat array
-            // 4 Channels: [LeftReal, LeftImag, RightReal, RightImag]
+            // Prepare Tensor Data [LeftReal, LeftImag, RightReal, RightImag]
             float[] tensorData = new float[4 * FreqBins * TimeFrames];
-            
-            for (int time = 0; time < TimeFrames; time++)
-            {
-                for (int freq = 0; freq < FreqBins; freq++)
-                {
-                    int lrIdx = (0 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int liIdx = (1 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int riIdx = (3 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
+            Complex32[] buffer = new Complex32[FftSize];
 
-                    // Ensure we don't go out of bounds on the final partial timeframe
-                    if (time < leftSpectrogram.Count)
-                    {
-                        // Extract from NWaves Tuple (Item1 = Real, Item2 = Imaginary)
-                        tensorData[lrIdx] = leftSpectrogram[time].Item1[freq];  // Left Real
-                        tensorData[liIdx] = leftSpectrogram[time].Item2[freq];  // Left Imag
-                        tensorData[rrIdx] = rightSpectrogram[time].Item1[freq]; // Right Real
-                        tensorData[riIdx] = rightSpectrogram[time].Item2[freq]; // Right Imag
-                    }
-                }
-            }
+            // Process Left Channel
+            ProcessStftChannel(left, tensorData, 0, 1, buffer);
+            // Process Right Channel
+            ProcessStftChannel(right, tensorData, 2, 3, buffer);
 
             return tensorData;
         }
 
         /// <summary>
-        /// Takes the 4D Tensor output from the neural network, unpacks it into Tuples, 
-        /// reattaches the Nyquist bin, applies ISTFT, and interleaves it back to audio.
+        /// Processes a single channel through the STFT and packs the complex result into the tensor array.
+        /// </summary>
+        private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realChannelIdx, int imagChannelIdx, Complex32[] buffer)
+        {
+            for (int t = 0; t < TimeFrames; t++)
+            {
+                int offset = t * HopSize;
+                
+                // 1. Apply Window and copy to Complex array
+                for (int i = 0; i < FftSize; i++)
+                {
+                    buffer[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
+                }
+
+                // 2. Perform MathNet Forward FFT (Matlab option ensures correct scaling)
+                Fourier.Forward(buffer, FourierOptions.Matlab);
+
+                // 3. Extract unique frequencies and pack into flat tensor array
+                for (int freq = 0; freq < FreqBins; freq++)
+                {
+                    int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+
+                    tensorData[rIdx] = buffer[freq].Real;
+                    tensorData[iIdx] = buffer[freq].Imaginary;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Takes the 4D Tensor output, performs MathNet ISTFT, applies 
+        /// Overlap-Add reconstruction, and interleaves it back to stereo audio.
         /// </summary>
         public float[] InverseTransformAndStitch(float[] tensorData)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
-            // NWaves Inverse expects a List of Tuples
-            var leftSpectrogram = new List<(float[], float[])>();
-            var rightSpectrogram = new List<(float[], float[])>();
-            
-            // FftSize / 2 + 1 (To account for the DC and Nyquist bins) = 3073
-            int arrayLength = FftSize / 2 + 1; 
+            float[] leftOut = new float[RequiredSamples];
+            float[] rightOut = new float[RequiredSamples];
+            float[] windowSum = new float[RequiredSamples];
+            Complex32[] buffer = new Complex32[FftSize];
 
-            for (int time = 0; time < TimeFrames; time++)
-            {
-                float[] leftReal = new float[arrayLength];
-                float[] leftImag = new float[arrayLength];
-                float[] rightReal = new float[arrayLength];
-                float[] rightImag = new float[arrayLength];
+            // Process Left Channel
+            ProcessIstftChannel(tensorData, leftOut, windowSum, 0, 1, buffer);
+            // Process Right Channel
+            ProcessIstftChannel(tensorData, rightOut, null, 2, 3, buffer);
 
-                for (int freq = 0; freq < FreqBins; freq++)
-                {
-                    int lrIdx = (0 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int liIdx = (1 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-                    int riIdx = (3 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
-
-                    leftReal[freq] = tensorData[lrIdx];
-                    leftImag[freq] = tensorData[liIdx];
-                    rightReal[freq] = tensorData[rrIdx];
-                    rightImag[freq] = tensorData[riIdx];
-                }
-                
-                // The Nyquist bin (freq 3072) was discarded by the model. It remains 0.0f by default.
-                
-                // Add the populated Tuple frames to the lists
-                leftSpectrogram.Add((leftReal, leftImag));
-                rightSpectrogram.Add((rightReal, rightImag));
-            }
-
-            // Execute ISTFT (Spectrogram to Audio)
-            float[] leftAudio = _stft.Inverse(leftSpectrogram);
-            float[] rightAudio = _stft.Inverse(rightSpectrogram);
-
-            // Interleave back to Stereo
-            int totalOutSamples = Math.Min(leftAudio.Length, rightAudio.Length);
-            float[] interleaved = new float[totalOutSamples * 2];
-            
-            for (int i = 0; i < totalOutSamples; i++)
-            {
-                interleaved[i * 2] = leftAudio[i];
-                interleaved[i * 2 + 1] = rightAudio[i];
-            }
-
-            // Trim to our exact RequiredSamples to strip STFT padding
+            // Interleave and Normalize
             float[] finalChunk = new float[RequiredSamples * _channels];
-            Array.Copy(interleaved, 0, finalChunk, 0, Math.Min(interleaved.Length, finalChunk.Length));
+            for (int i = 0; i < RequiredSamples; i++)
+            {
+                // Librosa-style overlap-add normalization (prevents volume swelling)
+                float norm = windowSum[i] > 1e-7f ? windowSum[i] : 1f;
+                
+                finalChunk[i * 2] = leftOut[i] / norm;
+                finalChunk[i * 2 + 1] = rightOut[i] / norm;
+            }
 
             return finalChunk;
         }
 
+        /// <summary>
+        /// Processes a tensor channel through the ISTFT and overlap-adds it to the output buffer.
+        /// </summary>
+        private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[]? windowSum, int realChannelIdx, int imagChannelIdx, Complex32[] buffer)
+        {
+            for (int t = 0; t < TimeFrames; t++)
+            {
+                // 1. Reconstruct complex spectrum from tensor
+                for (int freq = 0; freq < FreqBins; freq++)
+                {
+                    int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
+                    buffer[freq] = new Complex32(tensorData[rIdx], tensorData[iIdx]);
+                }
+
+                // Nyquist bin is 0
+                buffer[FreqBins] = Complex32.Zero;
+
+                // Complex conjugate for the mirrored upper frequencies
+                for (int f = 1; f < FftSize / 2; f++)
+                {
+                    buffer[FftSize - f] = new Complex32(buffer[f].Real, -buffer[f].Imaginary);
+                }
+
+                // 2. Perform MathNet Inverse FFT
+                Fourier.Inverse(buffer, FourierOptions.Matlab);
+
+                // 3. Apply Window and Overlap-Add
+                int offset = t * HopSize;
+                for (int i = 0; i < FftSize; i++)
+                {
+                    channelOut[offset + i] += buffer[i].Real * _window[i];
+                    
+                    if (windowSum != null)
+                    {
+                        windowSum[offset + i] += _window[i] * _window[i];
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Streams a single processed chunk directly into the pre-allocated output array.
+        /// </summary>
         public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, ref long writePosition)
         {
-            // Because STFT windowing reconstructs perfectly at the seams when using ISTFT, 
-            // we don't need manual overlap-add math anymore. NWaves handled it! We just stream it.
             int copyLength = Math.Min(chunk.Length, resultBuffer.Length - (int)writePosition);
             if (copyLength > 0)
             {
@@ -191,6 +223,9 @@ namespace VocalPure.Services
             }
         }
 
+        /// <summary>
+        /// Writes float audio data to a WAV file.
+        /// </summary>
         public void WriteWavFile(string filePath, float[] samples)
         {
             var format = new WaveFormat(_sampleRate, 32, _channels);
