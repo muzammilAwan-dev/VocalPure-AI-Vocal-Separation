@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
-using Microsoft.Win32;
+using Microsoft.Win32; // Now includes native OpenFolderDialog in .NET 8!
 using Serilog;
 using VocalPure.Models;
 using VocalPure.Services;
@@ -22,6 +22,7 @@ namespace VocalPure.ViewModels
         private readonly MediaProcessor _mediaProcessor;
         private readonly InferenceEngine _inferenceEngine;
         private readonly InferenceSettings _inferenceSettings;
+        private readonly AppSettingsManager _settingsManager; // NEW: Settings Manager
         private readonly DispatcherTimer _elapsedTimer;
         private CancellationTokenSource? _currentCts;
         private SeparationJob? _activeJob;
@@ -38,6 +39,8 @@ namespace VocalPure.ViewModels
             _mediaProcessor = new MediaProcessor();
             _inferenceSettings = InferenceSettings.CreateDefault();
             _inferenceEngine = new InferenceEngine(_inferenceSettings);
+            _settingsManager = new AppSettingsManager(); // Initialize settings
+
             _elapsedTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _elapsedTimer.Tick += OnElapsedTimerTick;
             _isProcessing = false;
@@ -55,15 +58,39 @@ namespace VocalPure.ViewModels
             OpenOutputFolderCommand = new RelayCommand<string>(OnOpenOutputFolder);
             InitializeCommand = new RelayCommand(() => _ = InitializeAsync());
             
-            // NEW COMMANDS FOR UI
             RemoveJobCommand = new RelayCommand<SeparationJob>(OnRemoveJob, job => job != null && job.Phase == ProcessingPhase.Idle);
             OpenGitHubCommand = new RelayCommand(OnOpenGitHub);
+            
+            // NEW: Output Folder Commands
+            ChangeOutputFolderCommand = new RelayCommand(OnChangeOutputFolder);
+            ResetOutputFolderCommand = new RelayCommand(OnResetOutputFolder);
 
             _ = InitializeAsync();
         }
 
         #region Properties
         public ObservableCollection<SeparationJob> JobQueue { get; }
+        
+        // NEW: Output Folder Properties connected directly to AppSettings
+        public string CustomOutputFolder
+        {
+            get => _settingsManager.CurrentSettings.CustomOutputFolder;
+            set
+            {
+                if (_settingsManager.CurrentSettings.CustomOutputFolder != value)
+                {
+                    _settingsManager.CurrentSettings.CustomOutputFolder = value;
+                    _settingsManager.SaveSettings(); // Auto-save on change
+                    OnPropertyChanged();
+                    OnPropertyChanged(nameof(DisplayOutputFolder));
+                    OnPropertyChanged(nameof(HasCustomOutputFolder));
+                }
+            }
+        }
+        
+        public string DisplayOutputFolder => string.IsNullOrWhiteSpace(CustomOutputFolder) ? "Same as original file" : CustomOutputFolder;
+        public bool HasCustomOutputFolder => !string.IsNullOrWhiteSpace(CustomOutputFolder);
+
         public bool IsProcessing
         {
             get => _isProcessing;
@@ -93,6 +120,8 @@ namespace VocalPure.ViewModels
         public RelayCommand InitializeCommand { get; }
         public RelayCommand<SeparationJob> RemoveJobCommand { get; }
         public RelayCommand OpenGitHubCommand { get; }
+        public RelayCommand ChangeOutputFolderCommand { get; }
+        public RelayCommand ResetOutputFolderCommand { get; }
         #endregion
 
         private async Task InitializeAsync()
@@ -143,6 +172,28 @@ namespace VocalPure.ViewModels
             };
 
             if (dialog.ShowDialog() == true) await HandleDroppedFilesAsync(dialog.FileNames);
+        }
+
+        // NEW: Output Folder Handlers
+        private void OnChangeOutputFolder()
+        {
+            var dialog = new OpenFolderDialog
+            {
+                Title = "Select Default Output Folder",
+                InitialDirectory = string.IsNullOrWhiteSpace(CustomOutputFolder) 
+                    ? Environment.GetFolderPath(Environment.SpecialFolder.Desktop) 
+                    : CustomOutputFolder
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                CustomOutputFolder = dialog.FolderName;
+            }
+        }
+
+        private void OnResetOutputFolder()
+        {
+            CustomOutputFolder = string.Empty;
         }
 
         private bool IsVideoFile(string path)
@@ -283,9 +334,13 @@ namespace VocalPure.ViewModels
             };
         }
 
-        private static string GenerateOutputPath(SeparationJob job)
+        private string GenerateOutputPath(SeparationJob job)
         {
-            string dir = Path.GetDirectoryName(job.InputFilePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            // NEW: Prioritize Custom Output Folder if one is set!
+            string dir = string.IsNullOrWhiteSpace(CustomOutputFolder)
+                ? (Path.GetDirectoryName(job.InputFilePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop))
+                : CustomOutputFolder;
+
             string baseName = Path.GetFileNameWithoutExtension(job.FileName);
             string ext = job.IsVideoOutput ? ".mp4" : Path.GetExtension(job.InputFilePath).ToLowerInvariant();
             if (string.IsNullOrEmpty(ext)) ext = ".wav";
