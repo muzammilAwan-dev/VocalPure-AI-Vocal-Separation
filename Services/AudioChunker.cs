@@ -84,7 +84,7 @@ namespace VocalPure.Services
                 right[i] = rawChunk[i * 2 + 1];
             }
 
-            // Execute STFT
+            // Execute STFT (NWaves returns a List of Tuples: (float[] Real, float[] Imag))
             var leftSpectrogram = _stft.Direct(left);
             var rightSpectrogram = _stft.Direct(right);
 
@@ -96,10 +96,6 @@ namespace VocalPure.Services
             {
                 for (int freq = 0; freq < FreqBins; freq++)
                 {
-                    // The NWaves STFT outputs a list of float[] where each array is a timeframe
-                    // containing [real0, imag0, real1, imag1...]
-                    int cplxIdx = freq * 2;
-                    
                     int lrIdx = (0 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
                     int liIdx = (1 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
                     int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
@@ -108,10 +104,11 @@ namespace VocalPure.Services
                     // Ensure we don't go out of bounds on the final partial timeframe
                     if (time < leftSpectrogram.Count)
                     {
-                        tensorData[lrIdx] = leftSpectrogram[time][cplxIdx];       // Left Real
-                        tensorData[liIdx] = leftSpectrogram[time][cplxIdx + 1];   // Left Imag
-                        tensorData[rrIdx] = rightSpectrogram[time][cplxIdx];      // Right Real
-                        tensorData[riIdx] = rightSpectrogram[time][cplxIdx + 1];  // Right Imag
+                        // Extract from NWaves Tuple (Item1 = Real, Item2 = Imaginary)
+                        tensorData[lrIdx] = leftSpectrogram[time].Item1[freq];  // Left Real
+                        tensorData[liIdx] = leftSpectrogram[time].Item2[freq];  // Left Imag
+                        tensorData[rrIdx] = rightSpectrogram[time].Item1[freq]; // Right Real
+                        tensorData[riIdx] = rightSpectrogram[time].Item2[freq]; // Right Imag
                     }
                 }
             }
@@ -120,21 +117,26 @@ namespace VocalPure.Services
         }
 
         /// <summary>
-        /// Takes the 4D Tensor output from the neural network, unpacks it, 
+        /// Takes the 4D Tensor output from the neural network, unpacks it into Tuples, 
         /// reattaches the Nyquist bin, applies ISTFT, and interleaves it back to audio.
         /// </summary>
         public float[] InverseTransformAndStitch(float[] tensorData)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
-            var leftSpectrogram = new List<float[]>();
-            var rightSpectrogram = new List<float[]>();
+            // NWaves Inverse expects a List of Tuples
+            var leftSpectrogram = new List<(float[], float[])>();
+            var rightSpectrogram = new List<(float[], float[])>();
+            
+            // FftSize / 2 + 1 (To account for the DC and Nyquist bins) = 3073
+            int arrayLength = FftSize / 2 + 1; 
 
             for (int time = 0; time < TimeFrames; time++)
             {
-                // Note: NWaves expects the array size to be FftSize + 2 (to hold the Nyquist bin)
-                float[] leftFrame = new float[FftSize + 2];
-                float[] rightFrame = new float[FftSize + 2];
+                float[] leftReal = new float[arrayLength];
+                float[] leftImag = new float[arrayLength];
+                float[] rightReal = new float[arrayLength];
+                float[] rightImag = new float[arrayLength];
 
                 for (int freq = 0; freq < FreqBins; freq++)
                 {
@@ -143,17 +145,17 @@ namespace VocalPure.Services
                     int rrIdx = (2 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
                     int riIdx = (3 * FreqBins * TimeFrames) + (freq * TimeFrames) + time;
 
-                    int cplxIdx = freq * 2;
-                    leftFrame[cplxIdx] = tensorData[lrIdx];
-                    leftFrame[cplxIdx + 1] = tensorData[liIdx];
-                    rightFrame[cplxIdx] = tensorData[rrIdx];
-                    rightFrame[cplxIdx + 1] = tensorData[riIdx];
+                    leftReal[freq] = tensorData[lrIdx];
+                    leftImag[freq] = tensorData[liIdx];
+                    rightReal[freq] = tensorData[rrIdx];
+                    rightImag[freq] = tensorData[riIdx];
                 }
                 
-                // The Nyquist bin (freq 3072) was discarded by the model. Keep it zero.
+                // The Nyquist bin (freq 3072) was discarded by the model. It remains 0.0f by default.
                 
-                leftSpectrogram.Add(leftFrame);
-                rightSpectrogram.Add(rightFrame);
+                // Add the populated Tuple frames to the lists
+                leftSpectrogram.Add((leftReal, leftImag));
+                rightSpectrogram.Add((rightReal, rightImag));
             }
 
             // Execute ISTFT (Spectrogram to Audio)
