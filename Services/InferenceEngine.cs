@@ -216,7 +216,7 @@ namespace VocalPure.Services
                 // 4. Stream to Buffer: Append perfectly aligned audio
                 chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
 
-                // Force GC to clear the large 12MB tensor arrays used during this pass
+                // Force GC to clear the tensor arrays used during this pass
                 if (i % 3 == 0)
                 {
                     GC.Collect(0, GCCollectionMode.Optimized);
