@@ -58,7 +58,6 @@
                     </Border>
                     
                     <Button Content="✕"
-                            Style="{StaticResource DangerButton}"
                             Width="20"
                             Height="20"
                             Padding="0"
