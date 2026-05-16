@@ -60,17 +60,21 @@ namespace VocalPure.Services
         /// <summary>
         /// Loads an ONNX model with the best available execution provider.
         /// </summary>
+        /// <param name="modelPath">Path to the .onnx model file.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         private void LoadModel(string modelPath, CancellationToken cancellationToken)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
+            // Reuse existing session if same model
             if (_session != null && _currentModelPath == modelPath)
             {
                 Log.Debug("Model {ModelPath} is already loaded. Reusing session.", modelPath);
                 return;
             }
 
+            // Dispose existing session
             _session?.Dispose();
             _session = null;
             _currentModelPath = null;
@@ -83,6 +87,7 @@ namespace VocalPure.Services
 
             Log.Information("Loading ONNX Model: {ModelPath}", Path.GetFileName(modelPath));
 
+            // Build session options with execution provider priority
             var sessionOptions = new SessionOptions
             {
                 LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
@@ -216,7 +221,7 @@ namespace VocalPure.Services
                 // 4. Stream to Buffer: Append perfectly aligned audio
                 chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
 
-                // Force GC to clear the tensor arrays used during this pass
+                // Force GC to clear the massive tensor arrays used during this pass
                 if (i % 3 == 0)
                 {
                     GC.Collect(0, GCCollectionMode.Optimized);
