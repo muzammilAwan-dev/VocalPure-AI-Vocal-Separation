@@ -7,7 +7,7 @@
         xmlns:models="clr-namespace:VocalPure.Models"
         Title="VocalPure - AI Vocal Separation"
         Width="920"
-        Height="740"
+        Height="780"
         MinWidth="750"
         MinHeight="550"
         Style="{StaticResource MainWindowStyle}"
@@ -109,6 +109,7 @@
 
     <Grid Background="{StaticResource BackgroundPrimary}">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -336,7 +337,55 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="3" Margin="20,12,20,0">
+        <Border Grid.Row="3"
+                Background="{StaticResource BackgroundSecondary}"
+                BorderBrush="{StaticResource BorderPrimary}"
+                BorderThickness="1"
+                CornerRadius="6"
+                Margin="20,12,20,0"
+                Padding="12,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                
+                <TextBlock Grid.Column="0" 
+                           Text="Output Destination:" 
+                           Style="{StaticResource SubHeaderText}" 
+                           FontSize="12" 
+                           VerticalAlignment="Center" 
+                           Margin="0,0,8,0"/>
+
+                <TextBlock Grid.Column="1" 
+                           Text="{Binding DisplayOutputFolder}" 
+                           Style="{StaticResource MutedText}" 
+                           Foreground="{StaticResource TextAccent}"
+                           VerticalAlignment="Center" 
+                           TextTrimming="CharacterEllipsis"/>
+
+                <Button Grid.Column="2" 
+                        Content="Change Folder" 
+                        Style="{StaticResource SecondaryButton}" 
+                        FontSize="11" 
+                        Padding="10,4" 
+                        Margin="12,0,0,0"
+                        Command="{Binding ChangeOutputFolderCommand}"/>
+
+                <Button Grid.Column="3" 
+                        Content="Reset" 
+                        Style="{StaticResource DangerButton}" 
+                        FontSize="11" 
+                        Padding="10,4" 
+                        Margin="8,0,0,0"
+                        Command="{Binding ResetOutputFolderCommand}"
+                        Visibility="{Binding HasCustomOutputFolder, Converter={StaticResource BoolToVis}}"/>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="4" Margin="20,12,20,0">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
@@ -415,7 +464,7 @@
             </Grid>
         </Grid>
 
-        <Border Grid.Row="4"
+        <Border Grid.Row="5"
                 Background="{StaticResource BackgroundSecondary}"
                 BorderBrush="{StaticResource BorderPrimary}"
                 BorderThickness="0,1,0,0"
