@@ -7,10 +7,6 @@ using NAudio.Wave;
 
 namespace VocalPure.Services
 {
-    /// <summary>
-    /// Advanced STFT Audio Processor matching UVR5 MDX-Net architecture.
-    /// Features Zero-Allocation Memory Pooling and Parallel Channel Processing.
-    /// </summary>
     public sealed class AudioChunker : IDisposable
     {
         private readonly int _sampleRate;
@@ -38,7 +34,6 @@ namespace VocalPure.Services
         private readonly float[] _leftWindowSum;
         private readonly float[] _rightWindowSum;
         
-        // Two independent complex buffers to allow parallel multi-threading
         private readonly Complex32[] _leftComplexBuf;
         private readonly Complex32[] _rightComplexBuf;
         
@@ -55,7 +50,6 @@ namespace VocalPure.Services
                 _window[i] = 0.5f * (1.0f - (float)Math.Cos(2.0 * Math.PI * i / FftSize));
             }
 
-            // Allocate memory block exactly once
             _readBuffer = new float[ChunkSize * _channels];
             _leftBuf = new float[ChunkSize];
             _rightBuf = new float[ChunkSize];
@@ -116,7 +110,6 @@ namespace VocalPure.Services
                 }
             }
 
-            // OPTIMIZATION: Process Left and Right channels on separate CPU cores simultaneously
             Parallel.Invoke(
                 () => ProcessStftChannel(_leftBuf, _tensorData, 0, 1, _leftComplexBuf),
                 () => ProcessStftChannel(_rightBuf, _tensorData, 2, 3, _rightComplexBuf)
@@ -130,7 +123,6 @@ namespace VocalPure.Services
             for (int t = 0; t < TimeFrames; t++)
             {
                 int offset = t * HopSize;
-                
                 for (int i = 0; i < FftSize; i++)
                 {
                     complexBuf[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
@@ -158,7 +150,6 @@ namespace VocalPure.Services
             Array.Clear(_leftWindowSum, 0, ChunkSize);
             Array.Clear(_rightWindowSum, 0, ChunkSize);
 
-            // OPTIMIZATION: Inverse process channels simultaneously
             Parallel.Invoke(
                 () => ProcessIstftChannel(tensorData, _leftOutBuf, _leftWindowSum, 0, 1, _leftComplexBuf),
                 () => ProcessIstftChannel(tensorData, _rightOutBuf, _rightWindowSum, 2, 3, _rightComplexBuf)
@@ -205,27 +196,26 @@ namespace VocalPure.Services
             }
         }
 
-        public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, ref long writePosition)
+        // NEW: Creates the direct pipeline to the hard drive
+        public WaveFileWriter CreateStreamWriter(string filePath)
+        {
+            var format = WaveFormat.CreateIeeeFloatWaveFormat(_sampleRate, _channels);
+            return new WaveFileWriter(filePath, format);
+        }
+
+        // NEW: Streams the 6-second chunk directly to disk and cuts off excess padding
+        public void WriteChunkToStream(WaveFileWriter writer, float[] chunk, ref long remainingSamplesToWrite)
         {
             int trimSamples = Trim * _channels;
             int validLength = GenSize * _channels;
-            int copyLength = Math.Min(validLength, resultBuffer.Length - (int)writePosition);
             
-            if (copyLength > 0)
+            int writeLength = (int)Math.Min(validLength, remainingSamplesToWrite);
+            
+            if (writeLength > 0)
             {
-                Array.Copy(chunk, trimSamples, resultBuffer, writePosition, copyLength);
-                writePosition += copyLength;
+                writer.WriteSamples(chunk, trimSamples, writeLength);
+                remainingSamplesToWrite -= writeLength;
             }
-        }
-
-        public void WriteWavFile(string filePath, float[] samples)
-        {
-            var format = WaveFormat.CreateIeeeFloatWaveFormat(_sampleRate, _channels);
-            using var writer = new WaveFileWriter(filePath, format);
-
-            byte[] byteBuffer = new byte[samples.Length * sizeof(float)];
-            Buffer.BlockCopy(samples, 0, byteBuffer, 0, byteBuffer.Length);
-            writer.Write(byteBuffer, 0, byteBuffer.Length);
         }
 
         public void Dispose()
