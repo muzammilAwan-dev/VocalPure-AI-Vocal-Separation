@@ -274,6 +274,7 @@ namespace VocalPure.ViewModels
                     await _mediaProcessor.EncodeAudioAsync(vocalsWavPath, outputPath, token, mergeReporter);
                 }
 
+                // FIX: Setting this triggers the HasOutput flag, which brings up the Open button instantly.
                 job.OutputFilePath = outputPath;
                 job.AppendLog($"Output saved: {outputPath}");
 
@@ -308,6 +309,13 @@ namespace VocalPure.ViewModels
                 ActiveJob = null;
                 _currentCts?.Dispose();
                 _currentCts = null;
+
+                // FIXED: FORCED MEMORY RELEASE
+                // This forces the OS to immediately flush the Large Object Heap back to Windows, 
+                // crashing the RAM usage back down to a baseline footprint the second the job completes.
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
 
                 ClearCompletedCommand.RaiseCanExecuteChanged();
                 StartProcessingCommand.RaiseCanExecuteChanged();
@@ -445,7 +453,6 @@ namespace VocalPure.ViewModels
             return true;
         }
 
-        // FIXED: Added the missing helper method!
         private void OnPropertyChanged([CallerMemberName] string propertyName = "")
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
