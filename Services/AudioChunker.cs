@@ -43,28 +43,18 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Reads a WAV file and returns the total number of float samples (interleaved).
-        /// </summary>
         public long GetTotalSamples(string wavFilePath)
         {
             using var reader = new WaveFileReader(wavFilePath);
             return reader.Length / sizeof(float);
         }
 
-        /// <summary>
-        /// Gets the total number of chunks needed for a given sample count.
-        /// </summary>
         public int GetChunkCount(long totalSamples)
         {
             long samplesPerChannel = totalSamples / _channels;
             return (int)Math.Ceiling((double)samplesPerChannel / RequiredSamples);
         }
 
-        /// <summary>
-        /// Reads a precise chunk of audio, applies STFT using MathNet, 
-        /// and packs it into a flat array for the [1, 4, 3072, 256] Tensor.
-        /// </summary>
         public float[] ReadAndTransformChunk(string wavFilePath, int chunkIndex)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
@@ -95,21 +85,19 @@ namespace VocalPure.Services
                 right[i] = rawChunk[i * 2 + 1];
             }
 
-            // Prepare Tensor Data [LeftReal, LeftImag, RightReal, RightImag]
+            // Prepare Tensor Data in the precise PyTorch stack format:
+            // [0: LeftReal, 1: LeftImag, 2: RightReal, 3: RightImag]
             float[] tensorData = new float[4 * FreqBins * TimeFrames];
             Complex32[] complexBuffer = new Complex32[FftSize];
 
-            // Process Left Channel
+            // Process Left Channel (Real is 0, Imag is 1)
             ProcessStftChannel(left, tensorData, 0, 1, complexBuffer);
-            // Process Right Channel
+            // Process Right Channel (Real is 2, Imag is 3)
             ProcessStftChannel(right, tensorData, 2, 3, complexBuffer);
 
             return tensorData;
         }
 
-        /// <summary>
-        /// Processes a single channel through the STFT and packs the complex result into the tensor array.
-        /// </summary>
         private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
         {
             for (int t = 0; t < TimeFrames; t++)
@@ -122,7 +110,7 @@ namespace VocalPure.Services
                     complexBuffer[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
                 }
 
-                // 2. Perform MathNet Forward FFT (Matlab option ensures correct scaling)
+                // 2. Perform MathNet Forward FFT
                 Fourier.Forward(complexBuffer, FourierOptions.Matlab);
 
                 // 3. Extract unique frequencies and pack into flat tensor array
@@ -137,10 +125,6 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Takes the 4D Tensor output, performs MathNet ISTFT, applies 
-        /// Overlap-Add reconstruction, and interleaves it back to stereo audio.
-        /// </summary>
         public float[] InverseTransformAndStitch(float[] tensorData)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
@@ -150,9 +134,9 @@ namespace VocalPure.Services
             float[] windowSum = new float[RequiredSamples];
             Complex32[] complexBuffer = new Complex32[FftSize];
 
-            // Process Left Channel
+            // Process Left Channel (Real is 0, Imag is 1)
             ProcessIstftChannel(tensorData, leftOut, windowSum, 0, 1, complexBuffer);
-            // Process Right Channel
+            // Process Right Channel (Real is 2, Imag is 3)
             ProcessIstftChannel(tensorData, rightOut, null, 2, 3, complexBuffer);
 
             // Interleave and Normalize
@@ -169,9 +153,6 @@ namespace VocalPure.Services
             return finalChunk;
         }
 
-        /// <summary>
-        /// Processes a tensor channel through the ISTFT and overlap-adds it to the output buffer.
-        /// </summary>
         private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[]? windowSum, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
         {
             for (int t = 0; t < TimeFrames; t++)
@@ -210,9 +191,6 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Streams a single processed chunk directly into the pre-allocated output array.
-        /// </summary>
         public void WriteChunkToBuffer(float[] resultBuffer, float[] chunk, int chunkIndex, ref long writePosition)
         {
             int copyLength = Math.Min(chunk.Length, resultBuffer.Length - (int)writePosition);
@@ -223,9 +201,6 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Writes float audio data to a WAV file.
-        /// </summary>
         public void WriteWavFile(string filePath, float[] samples)
         {
             var format = new WaveFormat(_sampleRate, 32, _channels);
