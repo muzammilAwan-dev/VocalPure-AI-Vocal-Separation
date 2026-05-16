@@ -89,7 +89,7 @@
 
                 <StackPanel Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2"
                             Orientation="Horizontal"
-                            Visibility="{Binding OutputFilePath, Converter={StaticResource BoolToVis}}">
+                            Visibility="{Binding HasOutput, Converter={StaticResource BoolToVis}}">
                     <TextBlock Text="Output: " Style="{StaticResource MutedText}"/>
                     <TextBlock Text="{Binding OutputFilePath}"
                                Style="{StaticResource MutedText}"
