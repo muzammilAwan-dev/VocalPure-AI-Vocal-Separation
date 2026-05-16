@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using NAudio.Wave;
 using Serilog;
 using VocalPure.Models;
 
@@ -19,7 +20,6 @@ namespace VocalPure.Services
         private string _activeExecutionProvider;
         private bool _isDisposed;
 
-        // ULTIMATE FIX: Pooled Output Buffer (Stops the 12.5MB .ToArray() leak)
         private readonly float[] _inferenceOutputBuffer = new float[4 * 3072 * 256];
 
         public string ActiveExecutionProvider => _activeExecutionProvider;
@@ -91,15 +91,11 @@ namespace VocalPure.Services
                         GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
                         InterOpNumThreads = _settings.InterOpNumThreads,
                         IntraOpNumThreads = _settings.IntraOpNumThreads,
-                        
-                        // ULTIMATE FIX: Forcefully disable the ONNX Hoarder Mechanics
                         EnableCpuMemArena = false,
                         EnableMemoryPattern = false
                     };
 
-                    // ULTIMATE FIX: Stop the model from expanding 400MB of weights into RAM
                     testOptions.AddSessionConfigEntry("session.disable_prepacking", "1");
-
                     configure(testOptions);
 
                     Log.Debug("Attempting to load model with {ProviderName}...", providerName);
@@ -144,12 +140,13 @@ namespace VocalPure.Services
 
             long totalSamples = chunker.GetTotalSamples(inputWavPath);
             int totalChunks = chunker.GetChunkCount(totalSamples);
+            long remainingSamples = totalSamples; // Used to track how much data is left to write
 
             Log.Information("Starting frequency-domain inference. Total Samples: {TotalSamples}, Total Chunks: {TotalChunks}", totalSamples, totalChunks);
             progress?.Report((0, 0, totalChunks, _activeExecutionProvider));
 
-            float[] finalStitchedOutput = new float[totalSamples];
-            long writePosition = 0;
+            // NEW: Open the pipeline to the hard drive
+            using var outputWriter = chunker.CreateStreamWriter(outputVocalsPath);
 
             for (int i = 0; i < totalChunks; i++)
             {
@@ -166,17 +163,14 @@ namespace VocalPure.Services
 
                 float[] audioChunk = await Task.Run(() => chunker.InverseTransformAndStitch(outputTensorData), cancellationToken);
 
-                chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
+                // NEW: Stream the output directly to the hard drive! Zero RAM buildup!
+                chunker.WriteChunkToStream(outputWriter, audioChunk, ref remainingSamples);
 
                 // Aggressive memory sweep after every chunk
                 GC.Collect(2, GCCollectionMode.Optimized, false);
             }
 
-            Log.Information("Inference complete. Writing output WAV to disk.");
-            progress?.Report((0.95, totalChunks, totalChunks, _activeExecutionProvider));
-
-            chunker.WriteWavFile(outputVocalsPath, finalStitchedOutput);
-
+            Log.Information("Inference complete. File successfully streamed to disk.");
             progress?.Report((1.0, totalChunks, totalChunks, _activeExecutionProvider));
         }
 
@@ -195,7 +189,6 @@ namespace VocalPure.Services
             using var results = _session.Run(inputs);
             var outputTensor = results.First(r => r.Name == outputName).AsTensor<float>();
 
-            // ULTIMATE FIX: Stream directly into the memory pool instead of triggering ToArray() leak
             if (outputTensor is DenseTensor<float> denseOutput)
             {
                 denseOutput.Buffer.Span.CopyTo(_inferenceOutputBuffer);
