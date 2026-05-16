@@ -11,11 +11,6 @@ using VocalPure.Models;
 
 namespace VocalPure.Services
 {
-    /// <summary>
-    /// ONNX Runtime inference engine for MDX-Net vocal separation.
-    /// Handles execution provider selection (DirectML > OpenVINO > CPU)
-    /// and feeds STFT spectrogram data to the neural network.
-    /// </summary>
     public sealed class InferenceEngine : IDisposable
     {
         private readonly InferenceSettings _settings;
@@ -24,9 +19,6 @@ namespace VocalPure.Services
         private string _activeExecutionProvider;
         private bool _isDisposed;
 
-        /// <summary>
-        /// Currently active execution provider name.
-        /// </summary>
         public string ActiveExecutionProvider => _activeExecutionProvider;
 
         public InferenceEngine(InferenceSettings settings)
@@ -35,9 +27,6 @@ namespace VocalPure.Services
             _activeExecutionProvider = "CPU";
         }
 
-        /// <summary>
-        /// Checks if GPU acceleration is available via DirectML or OpenVINO.
-        /// </summary>
         public bool CheckGpuAvailability()
         {
             try
@@ -57,24 +46,17 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Loads an ONNX model with the best available execution provider.
-        /// </summary>
-        /// <param name="modelPath">Path to the .onnx model file.</param>
-        /// <param name="cancellationToken">Cancellation token.</param>
         private void LoadModel(string modelPath, CancellationToken cancellationToken)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Reuse existing session if same model
             if (_session != null && _currentModelPath == modelPath)
             {
                 Log.Debug("Model {ModelPath} is already loaded. Reusing session.", modelPath);
                 return;
             }
 
-            // Dispose existing session
             _session?.Dispose();
             _session = null;
             _currentModelPath = null;
@@ -87,7 +69,6 @@ namespace VocalPure.Services
 
             Log.Information("Loading ONNX Model: {ModelPath}", Path.GetFileName(modelPath));
 
-            // Build session options with execution provider priority
             var sessionOptions = new SessionOptions
             {
                 LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
@@ -124,10 +105,7 @@ namespace VocalPure.Services
                         throw new InvalidOperationException("OpenVINO provider failed to initialize", ex);
                     }
                 })),
-                ("CPU", new Action<SessionOptions>(opts =>
-                {
-                    // CPU fallback
-                }))
+                ("CPU", new Action<SessionOptions>(opts => {}))
             };
 
             foreach (var (providerName, configure) in providerPriority)
@@ -164,10 +142,6 @@ namespace VocalPure.Services
                 (lastException != null ? $" Last error: {lastException.Message}" : ""), lastException);
         }
 
-        /// <summary>
-        /// Performs vocal separation on an audio file using the MDX-Net ONNX model.
-        /// Processes STFT spectrograms in precise 6.06-second chunks.
-        /// </summary>
         public async Task SeparateVocalsAsync(
             string inputWavPath,
             string outputVocalsPath,
@@ -178,7 +152,6 @@ namespace VocalPure.Services
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Phase 1: Load model
             progress?.Report((0, 0, 0, "Loading model..."));
             await Task.Run(() => LoadModel(modelPath, cancellationToken), cancellationToken);
 
@@ -196,7 +169,6 @@ namespace VocalPure.Services
             Log.Information("Starting frequency-domain inference. Total Samples: {TotalSamples}, Total Chunks: {TotalChunks}", totalSamples, totalChunks);
             progress?.Report((0, 0, totalChunks, _activeExecutionProvider));
 
-            // Pre-allocate the final output array to stream directly into
             float[] finalStitchedOutput = new float[totalSamples];
             long writePosition = 0;
 
@@ -205,26 +177,22 @@ namespace VocalPure.Services
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report(((double)i / totalChunks, i + 1, totalChunks, _activeExecutionProvider));
 
-                // 1. STFT: Read audio and transform to Complex Spectrogram Tensor
                 float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(inputWavPath, i), cancellationToken);
 
-                // 2. Inference: Process the spectrogram through MDX-Net
                 float[] outputTensorData = await Task.Run(() =>
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     return RunInference(tensorData, inputName, outputName);
                 }, cancellationToken);
 
-                // 3. ISTFT: Transform the separated vocal spectrogram back into audio
                 float[] audioChunk = await Task.Run(() => chunker.InverseTransformAndStitch(outputTensorData), cancellationToken);
 
-                // 4. Stream to Buffer: Append perfectly aligned audio
                 chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
 
-                // Force GC to clear the massive tensor arrays used during this pass
+                // FIXED: Must use Generation 2 collection to target Large Object Heap memory
                 if (i % 3 == 0)
                 {
-                    GC.Collect(0, GCCollectionMode.Optimized);
+                    GC.Collect(2, GCCollectionMode.Optimized, false);
                 }
             }
 
@@ -236,14 +204,10 @@ namespace VocalPure.Services
             progress?.Report((1.0, totalChunks, totalChunks, _activeExecutionProvider));
         }
 
-        /// <summary>
-        /// Runs a single inference pass expecting the strict [1, 4, 3072, 256] shape.
-        /// </summary>
         private float[] RunInference(float[] tensorData, string inputName, string outputName)
         {
             if (_session == null) throw new InvalidOperationException("Model not loaded.");
 
-            // MDX-Net strict frequency-domain shape: [Batch, Channels, FreqBins, TimeFrames]
             int[] shape = new[] { 1, 4, 3072, 256 };
             
             var inputTensor = new DenseTensor<float>(tensorData, shape);
@@ -259,9 +223,6 @@ namespace VocalPure.Services
             return outputTensor.ToArray();
         }
 
-        /// <summary>
-        /// Validates that the loaded model has expected MDX-Net characteristics.
-        /// </summary>
         private void ValidateModelMetadata()
         {
             if (_session == null) return;
@@ -286,9 +247,6 @@ namespace VocalPure.Services
             }
         }
 
-        /// <summary>
-        /// Releases the ONNX session and frees GPU memory.
-        /// </summary>
         public void Dispose()
         {
             if (_isDisposed) return;
