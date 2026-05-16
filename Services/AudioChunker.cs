@@ -80,9 +80,9 @@ namespace VocalPure.Services
                 if (bytePosition < reader.Length)
                 {
                     reader.Position = bytePosition;
-                    byte[] buffer = new byte[rawChunk.Length * sizeof(float)];
-                    int bytesRead = reader.Read(buffer, 0, buffer.Length);
-                    Buffer.BlockCopy(buffer, 0, rawChunk, 0, bytesRead);
+                    byte[] byteBuffer = new byte[rawChunk.Length * sizeof(float)];
+                    int bytesRead = reader.Read(byteBuffer, 0, byteBuffer.Length);
+                    Buffer.BlockCopy(byteBuffer, 0, rawChunk, 0, bytesRead);
                 }
             }
 
@@ -97,12 +97,12 @@ namespace VocalPure.Services
 
             // Prepare Tensor Data [LeftReal, LeftImag, RightReal, RightImag]
             float[] tensorData = new float[4 * FreqBins * TimeFrames];
-            Complex32[] buffer = new Complex32[FftSize];
+            Complex32[] complexBuffer = new Complex32[FftSize];
 
             // Process Left Channel
-            ProcessStftChannel(left, tensorData, 0, 1, buffer);
+            ProcessStftChannel(left, tensorData, 0, 1, complexBuffer);
             // Process Right Channel
-            ProcessStftChannel(right, tensorData, 2, 3, buffer);
+            ProcessStftChannel(right, tensorData, 2, 3, complexBuffer);
 
             return tensorData;
         }
@@ -110,7 +110,7 @@ namespace VocalPure.Services
         /// <summary>
         /// Processes a single channel through the STFT and packs the complex result into the tensor array.
         /// </summary>
-        private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realChannelIdx, int imagChannelIdx, Complex32[] buffer)
+        private void ProcessStftChannel(float[] channelAudio, float[] tensorData, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
         {
             for (int t = 0; t < TimeFrames; t++)
             {
@@ -119,11 +119,11 @@ namespace VocalPure.Services
                 // 1. Apply Window and copy to Complex array
                 for (int i = 0; i < FftSize; i++)
                 {
-                    buffer[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
+                    complexBuffer[i] = new Complex32(channelAudio[offset + i] * _window[i], 0f);
                 }
 
                 // 2. Perform MathNet Forward FFT (Matlab option ensures correct scaling)
-                Fourier.Forward(buffer, FourierOptions.Matlab);
+                Fourier.Forward(complexBuffer, FourierOptions.Matlab);
 
                 // 3. Extract unique frequencies and pack into flat tensor array
                 for (int freq = 0; freq < FreqBins; freq++)
@@ -131,8 +131,8 @@ namespace VocalPure.Services
                     int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
                     int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
 
-                    tensorData[rIdx] = buffer[freq].Real;
-                    tensorData[iIdx] = buffer[freq].Imaginary;
+                    tensorData[rIdx] = complexBuffer[freq].Real;
+                    tensorData[iIdx] = complexBuffer[freq].Imaginary;
                 }
             }
         }
@@ -148,12 +148,12 @@ namespace VocalPure.Services
             float[] leftOut = new float[RequiredSamples];
             float[] rightOut = new float[RequiredSamples];
             float[] windowSum = new float[RequiredSamples];
-            Complex32[] buffer = new Complex32[FftSize];
+            Complex32[] complexBuffer = new Complex32[FftSize];
 
             // Process Left Channel
-            ProcessIstftChannel(tensorData, leftOut, windowSum, 0, 1, buffer);
+            ProcessIstftChannel(tensorData, leftOut, windowSum, 0, 1, complexBuffer);
             // Process Right Channel
-            ProcessIstftChannel(tensorData, rightOut, null, 2, 3, buffer);
+            ProcessIstftChannel(tensorData, rightOut, null, 2, 3, complexBuffer);
 
             // Interleave and Normalize
             float[] finalChunk = new float[RequiredSamples * _channels];
@@ -172,7 +172,7 @@ namespace VocalPure.Services
         /// <summary>
         /// Processes a tensor channel through the ISTFT and overlap-adds it to the output buffer.
         /// </summary>
-        private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[]? windowSum, int realChannelIdx, int imagChannelIdx, Complex32[] buffer)
+        private void ProcessIstftChannel(float[] tensorData, float[] channelOut, float[]? windowSum, int realChannelIdx, int imagChannelIdx, Complex32[] complexBuffer)
         {
             for (int t = 0; t < TimeFrames; t++)
             {
@@ -181,26 +181,26 @@ namespace VocalPure.Services
                 {
                     int rIdx = (realChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
                     int iIdx = (imagChannelIdx * FreqBins * TimeFrames) + (freq * TimeFrames) + t;
-                    buffer[freq] = new Complex32(tensorData[rIdx], tensorData[iIdx]);
+                    complexBuffer[freq] = new Complex32(tensorData[rIdx], tensorData[iIdx]);
                 }
 
                 // Nyquist bin is 0
-                buffer[FreqBins] = Complex32.Zero;
+                complexBuffer[FreqBins] = Complex32.Zero;
 
                 // Complex conjugate for the mirrored upper frequencies
                 for (int f = 1; f < FftSize / 2; f++)
                 {
-                    buffer[FftSize - f] = new Complex32(buffer[f].Real, -buffer[f].Imaginary);
+                    complexBuffer[FftSize - f] = new Complex32(complexBuffer[f].Real, -complexBuffer[f].Imaginary);
                 }
 
                 // 2. Perform MathNet Inverse FFT
-                Fourier.Inverse(buffer, FourierOptions.Matlab);
+                Fourier.Inverse(complexBuffer, FourierOptions.Matlab);
 
                 // 3. Apply Window and Overlap-Add
                 int offset = t * HopSize;
                 for (int i = 0; i < FftSize; i++)
                 {
-                    channelOut[offset + i] += buffer[i].Real * _window[i];
+                    channelOut[offset + i] += complexBuffer[i].Real * _window[i];
                     
                     if (windowSum != null)
                     {
