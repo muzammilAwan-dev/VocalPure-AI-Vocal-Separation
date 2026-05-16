@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic; // FIX: Added missing namespace for EqualityComparer
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -7,10 +7,6 @@ using System.Windows;
 
 namespace VocalPure.Models
 {
-    /// <summary>
-    /// Represents a single vocal separation job with all tracking properties.
-    /// Implements INotifyPropertyChanged for real-time UI updates.
-    /// </summary>
     public sealed class SeparationJob : INotifyPropertyChanged, IDisposable
     {
         private string _id;
@@ -51,45 +47,48 @@ namespace VocalPure.Models
             _isVideoOutput = false;
         }
 
-        /// <summary>Unique job identifier.</summary>
         public string Id
         {
             get => _id;
             private set => SetProperty(ref _id, value);
         }
 
-        /// <summary>Full path to the input media file.</summary>
         public string InputFilePath
         {
             get => _inputFilePath;
             set => SetProperty(ref _inputFilePath, value);
         }
 
-        /// <summary>Full path to the output file (set after processing).</summary>
         public string? OutputFilePath
         {
             get => _outputFilePath;
-            set => SetProperty(ref _outputFilePath, value);
+            set
+            {
+                if (SetProperty(ref _outputFilePath, value))
+                {
+                    // Trigger the UI to evaluate the new HasOutput boolean
+                    OnPropertyChanged(nameof(HasOutput));
+                }
+            }
         }
 
-        /// <summary>Display name of the file.</summary>
+        // NEW: This boolean perfectly hooks into the UI Visibility Converter
+        public bool HasOutput => !string.IsNullOrWhiteSpace(OutputFilePath);
+
         public string FileName
         {
             get => _fileName;
             set => SetProperty(ref _fileName, value);
         }
 
-        /// <summary>File size in bytes.</summary>
         public long FileSize
         {
             get => _fileSize;
             set => SetProperty(ref _fileSize, value);
         }
 
-        /// <summary>Formatted file size string (e.g., "15.2 MB").</summary>
         public string FormattedFileSize => FormatBytes(_fileSize);
 
-        /// <summary>Current processing phase.</summary>
         public ProcessingPhase Phase
         {
             get => _phase;
@@ -104,7 +103,6 @@ namespace VocalPure.Models
             }
         }
 
-        /// <summary>Overall progress (0.0 to 1.0).</summary>
         public double OverallProgress
         {
             get => _overallProgress;
@@ -117,42 +115,36 @@ namespace VocalPure.Models
             }
         }
 
-        /// <summary>Progress of the current phase (0.0 to 1.0).</summary>
         public double CurrentPhaseProgress
         {
             get => _currentPhaseProgress;
             set => SetProperty(ref _currentPhaseProgress, Math.Clamp(value, 0.0, 1.0));
         }
 
-        /// <summary>Human-readable status message.</summary>
         public string StatusMessage
         {
             get => _statusMessage;
             set => SetProperty(ref _statusMessage, value);
         }
 
-        /// <summary>Detailed processing log for the status panel.</summary>
         public string DetailedLog
         {
             get => _detailedLog;
             set => SetProperty(ref _detailedLog, value);
         }
 
-        /// <summary>Whether the job is currently active.</summary>
         public bool IsActive
         {
             get => _isActive;
             set => SetProperty(ref _isActive, value);
         }
 
-        /// <summary>When the job started processing.</summary>
         public DateTime StartTime
         {
             get => _startTime;
             set => SetProperty(ref _startTime, value);
         }
 
-        /// <summary>Elapsed processing time.</summary>
         public TimeSpan Elapsed
         {
             get => _elapsed;
@@ -165,41 +157,34 @@ namespace VocalPure.Models
             }
         }
 
-        /// <summary>Estimated time remaining based on current progress.</summary>
         public TimeSpan? EstimatedRemaining
         {
             get => _estimatedRemaining;
             private set => SetProperty(ref _estimatedRemaining, value);
         }
 
-        /// <summary>ONNX execution provider being used (e.g., "DirectML", "CPU").</summary>
         public string ExecutionProvider
         {
             get => _executionProvider;
             set => SetProperty(ref _executionProvider, value);
         }
 
-        /// <summary>Error message if the job failed.</summary>
         public string ErrorMessage
         {
             get => _errorMessage;
             set => SetProperty(ref _errorMessage, value);
         }
 
-        /// <summary>Whether to output as video (muxed) or audio-only.</summary>
         public bool IsVideoOutput
         {
             get => _isVideoOutput;
             set => SetProperty(ref _isVideoOutput, value);
         }
 
-        /// <summary>Whether the job has reached a terminal state.</summary>
         public bool IsTerminal => Phase.IsTerminal();
 
-        /// <summary>Whether the job can be cancelled.</summary>
         public bool CanCancel => IsActive && !Phase.IsTerminal();
 
-        /// <summary>Appends a line to the detailed processing log.</summary>
         public void AppendLog(string message)
         {
             string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -209,7 +194,6 @@ namespace VocalPure.Models
             });
         }
 
-        /// <summary>Updates the estimated remaining time based on progress.</summary>
         private void UpdateEstimatedRemaining()
         {
             if (OverallProgress > 0.01 && OverallProgress < 1.0)
@@ -224,7 +208,6 @@ namespace VocalPure.Models
             }
         }
 
-        /// <summary>Formats bytes to human-readable string.</summary>
         private static string FormatBytes(long bytes)
         {
             string[] sizes = { "B", "KB", "MB", "GB" };
@@ -239,7 +222,6 @@ namespace VocalPure.Models
         }
 
         #region INotifyPropertyChanged
-
         public event PropertyChangedEventHandler? PropertyChanged;
 
         private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
@@ -256,12 +238,8 @@ namespace VocalPure.Models
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
-
         #endregion
 
-        public void Dispose()
-        {
-            // Cleanup if needed
-        }
+        public void Dispose() { }
     }
 }
