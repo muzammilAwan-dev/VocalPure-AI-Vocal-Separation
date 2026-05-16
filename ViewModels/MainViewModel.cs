@@ -16,10 +16,6 @@ using VocalPure.Services;
 
 namespace VocalPure.ViewModels
 {
-    /// <summary>
-    /// Main ViewModel for the VocalPure application.
-    /// Manages the separation queue, handles drag-and-drop, and orchestrates processing.
-    /// </summary>
     public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
     {
         private readonly DependencyManager _dependencyManager;
@@ -58,6 +54,10 @@ namespace VocalPure.ViewModels
             ClearCompletedCommand = new RelayCommand(OnClearCompleted, () => JobQueue.Any(j => j.IsTerminal));
             OpenOutputFolderCommand = new RelayCommand<string>(OnOpenOutputFolder);
             InitializeCommand = new RelayCommand(() => _ = InitializeAsync());
+            
+            // NEW COMMANDS FOR UI
+            RemoveJobCommand = new RelayCommand<SeparationJob>(OnRemoveJob, job => job != null && job.Phase == ProcessingPhase.Idle);
+            OpenGitHubCommand = new RelayCommand(OnOpenGitHub);
 
             _ = InitializeAsync();
         }
@@ -91,6 +91,8 @@ namespace VocalPure.ViewModels
         public RelayCommand ClearCompletedCommand { get; }
         public RelayCommand<string> OpenOutputFolderCommand { get; }
         public RelayCommand InitializeCommand { get; }
+        public RelayCommand<SeparationJob> RemoveJobCommand { get; }
+        public RelayCommand OpenGitHubCommand { get; }
         #endregion
 
         private async Task InitializeAsync()
@@ -211,8 +213,6 @@ namespace VocalPure.ViewModels
 
                 job.Phase = ProcessingPhase.MergingOutput;
                 job.AppendLog("Phase 3: Encoding final output...");
-                
-                // Uses our new dynamic output path generation!
                 string outputPath = GenerateOutputPath(job);
                 
                 var mergeReporter = new Progress<double>(p => ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.MergingOutput, p, $"FFmpeg encode: {p:P0}")));
@@ -287,8 +287,6 @@ namespace VocalPure.ViewModels
         {
             string dir = Path.GetDirectoryName(job.InputFilePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             string baseName = Path.GetFileNameWithoutExtension(job.FileName);
-            
-            // DYNAMIC EXTENSION FIX: Grabs the original format (e.g., .mp3) so FFmpeg encodes it correctly
             string ext = job.IsVideoOutput ? ".mp4" : Path.GetExtension(job.InputFilePath).ToLowerInvariant();
             if (string.IsNullOrEmpty(ext)) ext = ".wav";
             
@@ -341,6 +339,32 @@ namespace VocalPure.ViewModels
             {
                 JobQueue.Remove(job);
                 job.Dispose();
+            }
+        }
+
+        private void OnRemoveJob(SeparationJob? job)
+        {
+            if (job != null && JobQueue.Contains(job))
+            {
+                JobQueue.Remove(job);
+                job.Dispose();
+                StartProcessingCommand.RaiseCanExecuteChanged();
+            }
+        }
+
+        private void OnOpenGitHub()
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "https://github.com/muzammilAwan-dev",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to open GitHub link.");
             }
         }
 
