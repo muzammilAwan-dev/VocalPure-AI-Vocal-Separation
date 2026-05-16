@@ -19,6 +19,9 @@ namespace VocalPure.Services
         private string _activeExecutionProvider;
         private bool _isDisposed;
 
+        // ULTIMATE FIX: Pooled Output Buffer (Stops the 12.5MB .ToArray() leak)
+        private readonly float[] _inferenceOutputBuffer = new float[4 * 3072 * 256];
+
         public string ActiveExecutionProvider => _activeExecutionProvider;
 
         public InferenceEngine(InferenceSettings settings)
@@ -69,44 +72,14 @@ namespace VocalPure.Services
 
             Log.Information("Loading ONNX Model: {ModelPath}", Path.GetFileName(modelPath));
 
-            var sessionOptions = new SessionOptions
+            var providerPriority = new List<(string Name, Action<SessionOptions> Configure)>
             {
-                LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
-                GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
-                InterOpNumThreads = _settings.InterOpNumThreads,
-                IntraOpNumThreads = _settings.IntraOpNumThreads
+                ("DirectML", new Action<SessionOptions>(opts => opts.AppendExecutionProvider_DML(0))),
+                ("OpenVINO", new Action<SessionOptions>(opts => opts.AppendExecutionProvider_OpenVINO("GPU_FP16"))),
+                ("CPU", new Action<SessionOptions>(opts => {}))
             };
 
             Exception? lastException = null;
-
-            var providerPriority = new List<(string Name, Action<SessionOptions> Configure)>
-            {
-                ("DirectML", new Action<SessionOptions>(opts =>
-                {
-                    try
-                    {
-                        opts.AppendExecutionProvider_DML(0); 
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "DirectML provider initialization failed.");
-                        throw new InvalidOperationException("DirectML provider failed to initialize", ex);
-                    }
-                })),
-                ("OpenVINO", new Action<SessionOptions>(opts =>
-                {
-                    try
-                    {
-                        opts.AppendExecutionProvider_OpenVINO("GPU_FP16");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "OpenVINO provider initialization failed.");
-                        throw new InvalidOperationException("OpenVINO provider failed to initialize", ex);
-                    }
-                })),
-                ("CPU", new Action<SessionOptions>(opts => {}))
-            };
 
             foreach (var (providerName, configure) in providerPriority)
             {
@@ -115,8 +88,17 @@ namespace VocalPure.Services
                     var testOptions = new SessionOptions
                     {
                         LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
-                        GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel
+                        GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
+                        InterOpNumThreads = _settings.InterOpNumThreads,
+                        IntraOpNumThreads = _settings.IntraOpNumThreads,
+                        
+                        // ULTIMATE FIX: Forcefully disable the ONNX Hoarder Mechanics
+                        EnableCpuMemArena = false,
+                        EnableMemoryPattern = false
                     };
+
+                    // ULTIMATE FIX: Stop the model from expanding 400MB of weights into RAM
+                    testOptions.AddSessionConfigEntry("session.disable_prepacking", "1");
 
                     configure(testOptions);
 
@@ -136,10 +118,7 @@ namespace VocalPure.Services
                 }
             }
 
-            throw new InvalidOperationException(
-                "Failed to initialize any ONNX execution provider. " +
-                "Ensure Visual C++ Redistributables are installed." +
-                (lastException != null ? $" Last error: {lastException.Message}" : ""), lastException);
+            throw new InvalidOperationException("Failed to initialize any ONNX execution provider.", lastException);
         }
 
         public async Task SeparateVocalsAsync(
@@ -189,11 +168,8 @@ namespace VocalPure.Services
 
                 chunker.WriteChunkToBuffer(finalStitchedOutput, audioChunk, i, ref writePosition);
 
-                // FIXED: Must use Generation 2 collection to target Large Object Heap memory
-                if (i % 3 == 0)
-                {
-                    GC.Collect(2, GCCollectionMode.Optimized, false);
-                }
+                // Aggressive memory sweep after every chunk
+                GC.Collect(2, GCCollectionMode.Optimized, false);
             }
 
             Log.Information("Inference complete. Writing output WAV to disk.");
@@ -209,7 +185,6 @@ namespace VocalPure.Services
             if (_session == null) throw new InvalidOperationException("Model not loaded.");
 
             int[] shape = new[] { 1, 4, 3072, 256 };
-            
             var inputTensor = new DenseTensor<float>(tensorData, shape);
 
             var inputs = new List<NamedOnnxValue>
@@ -220,13 +195,23 @@ namespace VocalPure.Services
             using var results = _session.Run(inputs);
             var outputTensor = results.First(r => r.Name == outputName).AsTensor<float>();
 
-            return outputTensor.ToArray();
+            // ULTIMATE FIX: Stream directly into the memory pool instead of triggering ToArray() leak
+            if (outputTensor is DenseTensor<float> denseOutput)
+            {
+                denseOutput.Buffer.Span.CopyTo(_inferenceOutputBuffer);
+            }
+            else
+            {
+                var array = outputTensor.ToArray();
+                Array.Copy(array, _inferenceOutputBuffer, array.Length);
+            }
+
+            return _inferenceOutputBuffer;
         }
 
         private void ValidateModelMetadata()
         {
             if (_session == null) return;
-
             try
             {
                 var modelMetadata = _session.ModelMetadata;
