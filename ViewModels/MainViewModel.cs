@@ -9,7 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
-using Microsoft.Win32; // Now includes native OpenFolderDialog in .NET 8!
+using Microsoft.Win32; 
 using Serilog;
 using VocalPure.Models;
 using VocalPure.Services;
@@ -22,7 +22,7 @@ namespace VocalPure.ViewModels
         private readonly MediaProcessor _mediaProcessor;
         private readonly InferenceEngine _inferenceEngine;
         private readonly InferenceSettings _inferenceSettings;
-        private readonly AppSettingsManager _settingsManager; // NEW: Settings Manager
+        private readonly AppSettingsManager _settingsManager;
         private readonly DispatcherTimer _elapsedTimer;
         private CancellationTokenSource? _currentCts;
         private SeparationJob? _activeJob;
@@ -39,7 +39,7 @@ namespace VocalPure.ViewModels
             _mediaProcessor = new MediaProcessor();
             _inferenceSettings = InferenceSettings.CreateDefault();
             _inferenceEngine = new InferenceEngine(_inferenceSettings);
-            _settingsManager = new AppSettingsManager(); // Initialize settings
+            _settingsManager = new AppSettingsManager();
 
             _elapsedTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _elapsedTimer.Tick += OnElapsedTimerTick;
@@ -61,7 +61,6 @@ namespace VocalPure.ViewModels
             RemoveJobCommand = new RelayCommand<SeparationJob>(OnRemoveJob, job => job != null && job.Phase == ProcessingPhase.Idle);
             OpenGitHubCommand = new RelayCommand(OnOpenGitHub);
             
-            // NEW: Output Folder Commands
             ChangeOutputFolderCommand = new RelayCommand(OnChangeOutputFolder);
             ResetOutputFolderCommand = new RelayCommand(OnResetOutputFolder);
 
@@ -71,7 +70,6 @@ namespace VocalPure.ViewModels
         #region Properties
         public ObservableCollection<SeparationJob> JobQueue { get; }
         
-        // NEW: Output Folder Properties connected directly to AppSettings
         public string CustomOutputFolder
         {
             get => _settingsManager.CurrentSettings.CustomOutputFolder;
@@ -80,7 +78,7 @@ namespace VocalPure.ViewModels
                 if (_settingsManager.CurrentSettings.CustomOutputFolder != value)
                 {
                     _settingsManager.CurrentSettings.CustomOutputFolder = value;
-                    _settingsManager.SaveSettings(); // Auto-save on change
+                    _settingsManager.SaveSettings(); 
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(DisplayOutputFolder));
                     OnPropertyChanged(nameof(HasCustomOutputFolder));
@@ -174,7 +172,6 @@ namespace VocalPure.ViewModels
             if (dialog.ShowDialog() == true) await HandleDroppedFilesAsync(dialog.FileNames);
         }
 
-        // NEW: Output Folder Handlers
         private void OnChangeOutputFolder()
         {
             var dialog = new OpenFolderDialog
@@ -336,7 +333,6 @@ namespace VocalPure.ViewModels
 
         private string GenerateOutputPath(SeparationJob job)
         {
-            // NEW: Prioritize Custom Output Folder if one is set!
             string dir = string.IsNullOrWhiteSpace(CustomOutputFolder)
                 ? (Path.GetDirectoryName(job.InputFilePath) ?? Environment.GetFolderPath(Environment.SpecialFolder.Desktop))
                 : CustomOutputFolder;
@@ -438,7 +434,9 @@ namespace VocalPure.ViewModels
             if (ActiveJob != null && ActiveJob.StartTime != DateTime.MinValue) ActiveJob.Elapsed = DateTime.Now - ActiveJob.StartTime;
         }
 
+        #region INotifyPropertyChanged
         public event PropertyChangedEventHandler? PropertyChanged;
+        
         private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
         {
             if (EqualityComparer<T>.Default.Equals(field, value)) return false;
@@ -446,6 +444,13 @@ namespace VocalPure.ViewModels
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
             return true;
         }
+
+        // FIXED: Added the missing helper method!
+        private void OnPropertyChanged([CallerMemberName] string propertyName = "")
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+        #endregion
 
         public void Dispose()
         {
