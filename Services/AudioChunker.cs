@@ -23,8 +23,6 @@ namespace VocalPure.Services
         public const int GenSize = ChunkSize - 2 * Trim;
 
         private readonly float[] _window;
-
-        // --- ZERO-ALLOCATION MEMORY POOL ---
         private readonly float[] _readBuffer;
         private readonly float[] _leftBuf;
         private readonly float[] _rightBuf;
@@ -33,10 +31,12 @@ namespace VocalPure.Services
         private readonly float[] _rightOutBuf;
         private readonly float[] _leftWindowSum;
         private readonly float[] _rightWindowSum;
-        
         private readonly Complex32[] _leftComplexBuf;
         private readonly Complex32[] _rightComplexBuf;
         private readonly float[] _finalChunkBuf;
+
+        // CRITICAL FIX: Lock to protect NAudio.Wave.AudioFileReader from parallel race conditions
+        private readonly object _readLock = new object();
 
         public AudioChunker(int sampleRate = 44100, int channels = 2)
         {
@@ -62,7 +62,6 @@ namespace VocalPure.Services
             _finalChunkBuf = new float[ChunkSize * _channels];
         }
 
-        // CRITICAL FIX: Accepts the persistent reader instead of reopening the file path
         public long GetTotalSamples(AudioFileReader reader)
         {
             return reader.Length / (reader.WaveFormat.BitsPerSample / 8);
@@ -76,7 +75,6 @@ namespace VocalPure.Services
             return (int)(totalPadded / GenSize);
         }
 
-        // CRITICAL FIX: Utilizes the shared reader, moving the read position seamlessly
         public float[] ReadAndTransformChunk(AudioFileReader reader, int chunkIndex)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
@@ -96,8 +94,14 @@ namespace VocalPure.Services
             
             if (fileSamplesToRead > 0)
             {
-                reader.Position = fileStart * reader.WaveFormat.BlockAlign;
-                int floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
+                int floatsRead;
+                
+                // CRITICAL FIX: Safe locking around AudioFileReader access
+                lock (_readLock)
+                {
+                    reader.Position = fileStart * reader.WaveFormat.BlockAlign;
+                    floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
+                }
                 
                 int validSamples = floatsRead / _channels;
                 for (int i = 0; i < validSamples; i++)
