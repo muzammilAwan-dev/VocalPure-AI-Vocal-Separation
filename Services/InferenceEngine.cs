@@ -71,8 +71,9 @@ namespace VocalPure.Services
                     {
                         LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
                         GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
-                        InterOpNumThreads = _settings.InterOpNumThreads,
-                        IntraOpNumThreads = _settings.IntraOpNumThreads,
+                        InterOpNumThreads = Environment.ProcessorCount, // Force all logical cores
+                        IntraOpNumThreads = Environment.ProcessorCount, // Force all logical cores
+                        ExecutionMode = ExecutionMode.ORT_PARALLEL,     // UNLOCK MULTI-CORE PROCESSING
                         EnableCpuMemArena = false,
                         EnableMemoryPattern = false
                     };
