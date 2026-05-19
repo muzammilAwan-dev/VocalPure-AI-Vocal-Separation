@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
-using VocalPure.Models; // FIX: Added missing namespace
+using VocalPure.Models; 
 
 namespace VocalPure.Converters
 {
@@ -147,6 +147,24 @@ namespace VocalPure.Converters
                 };
             }
             return IdleBrush;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotSupportedException();
+        }
+    }
+
+    // CRITICAL FIX: The new converter that correctly checks if the TimeSpan is null to show the ETA
+    /// <summary>
+    /// Converts null to Collapsed and non-null to Visible.
+    /// </summary>
+    [ValueConversion(typeof(object), typeof(Visibility))]
+    public sealed class NullToVisibilityConverter : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            return value is null ? Visibility.Collapsed : Visibility.Visible;
         }
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
