@@ -7,7 +7,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
-using NAudio.Wave;
 using Serilog;
 using VocalPure.Models;
 
@@ -20,8 +19,6 @@ namespace VocalPure.Services
         private string? _currentModelPath;
         private string _activeExecutionProvider;
         private bool _isDisposed;
-
-        private readonly float[] _inferenceOutputBuffer = new float[4 * 3072 * 256];
 
         public string ActiveExecutionProvider => _activeExecutionProvider;
 
@@ -40,7 +37,11 @@ namespace VocalPure.Services
                        availableProviders.Contains("OpenVINO") ||
                        availableProviders.Any(p => p.Contains("CUDA", StringComparison.OrdinalIgnoreCase));
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "GPU availability check failed. Defaulting to CPU.");
+                return false; 
+            }
         }
 
         private void LoadModel(string modelPath, CancellationToken cancellationToken)
@@ -71,9 +72,12 @@ namespace VocalPure.Services
                     {
                         LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
                         GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
-                        InterOpNumThreads = Environment.ProcessorCount,
-                        IntraOpNumThreads = Environment.ProcessorCount,
-                        ExecutionMode = ExecutionMode.ORT_PARALLEL,
+                        
+                        // CRITICAL FIX: Properly map thread counts and dynamic execution modes
+                        ExecutionMode = providerName == "CPU" ? ExecutionMode.ORT_PARALLEL : ExecutionMode.ORT_SEQUENTIAL,
+                        IntraOpNumThreads = providerName == "CPU" ? _settings.IntraOpNumThreads : 1,
+                        InterOpNumThreads = _settings.InterOpNumThreads,
+                        
                         EnableCpuMemArena = false,
                         EnableMemoryPattern = false
                     };
@@ -84,6 +88,15 @@ namespace VocalPure.Services
                     _session = new InferenceSession(modelPath, testOptions);
                     _currentModelPath = modelPath;
                     _activeExecutionProvider = providerName;
+
+                    // CRITICAL FIX: GPU Warmup pass to eliminate the 10-second stall on chunk 1
+                    if (providerName != "CPU")
+                    {
+                        Log.Information("Performing GPU kernel warmup pass...");
+                        var warmupData = new float[4 * 3072 * 256];
+                        RunInference(warmupData, _session.InputMetadata.Keys.First(), _session.OutputMetadata.Keys.First());
+                    }
+
                     return;
                 }
                 catch { continue; }
@@ -109,9 +122,7 @@ namespace VocalPure.Services
             string outputName = _session.OutputMetadata.Keys.First();
 
             using var chunker = new AudioChunker(_settings.SampleRate, _settings.Channels);
-            
-            // CRITICAL FIX: Instantiate the reader once, keeping the I/O stream persistent
-            using var audioReader = new AudioFileReader(inputWavPath);
+            using var audioReader = new NAudio.Wave.AudioFileReader(inputWavPath);
             
             long totalSamples = chunker.GetTotalSamples(audioReader);
             int totalChunks = chunker.GetChunkCount(totalSamples);
@@ -135,10 +146,7 @@ namespace VocalPure.Services
                 TimeSpan startCpuTime = currentProcess.TotalProcessorTime;
                 long startRealTime = realTimeSw.ElapsedMilliseconds;
 
-                // --- PIPELINE EXECUTION ---
                 telemetrySw.Restart();
-                
-                // Pass the persistent reader down to the chunker to eliminate redundant metadata parsing
                 float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(audioReader, i), cancellationToken);
                 long readTime = telemetrySw.ElapsedMilliseconds;
 
@@ -154,7 +162,6 @@ namespace VocalPure.Services
                 chunker.WriteChunkToStream(outputWriter, audioChunk, ref remainingSamples);
                 long writeTime = telemetrySw.ElapsedMilliseconds;
 
-                // --- HARDWARE CALCULATION ---
                 TimeSpan endCpuTime = currentProcess.TotalProcessorTime;
                 long endRealTime = realTimeSw.ElapsedMilliseconds;
 
@@ -167,8 +174,6 @@ namespace VocalPure.Services
 
                 Log.Information("[TELEMETRY] Chunk {Chunk:D3} | Read: {Read:D4}ms | ONNX: {Onnx:D4}ms | ISTFT: {Istft:D4}ms | Write: {Write:D4}ms || CPU: {Cpu:00.0}% | RAM: {Ram} MB",
                     i + 1, readTime, onnxTime, istftTime, writeTime, cpuPercent, ramMb);
-
-                GC.Collect(2, GCCollectionMode.Optimized, false);
             }
 
             progress?.Report((1.0, totalChunks, totalChunks, _activeExecutionProvider));
@@ -180,19 +185,9 @@ namespace VocalPure.Services
 
             var inputTensor = new DenseTensor<float>(tensorData, new[] { 1, 4, 3072, 256 });
             using var results = _session.Run(new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, inputTensor) });
-            var outputTensor = results.First(r => r.Name == outputName).AsTensor<float>();
-
-            if (outputTensor is DenseTensor<float> denseOutput)
-            {
-                denseOutput.Buffer.Span.CopyTo(_inferenceOutputBuffer);
-            }
-            else
-            {
-                var array = outputTensor.ToArray();
-                Array.Copy(array, _inferenceOutputBuffer, array.Length);
-            }
-
-            return _inferenceOutputBuffer;
+            
+            // CRITICAL FIX: Safe memory allocation per-chunk prevents batched-mode memory corruption
+            return results.First(r => r.Name == outputName).AsTensor<float>().ToArray();
         }
 
         public void Dispose()
