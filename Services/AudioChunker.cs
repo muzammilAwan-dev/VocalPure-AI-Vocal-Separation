@@ -62,9 +62,9 @@ namespace VocalPure.Services
             _finalChunkBuf = new float[ChunkSize * _channels];
         }
 
-        public long GetTotalSamples(string wavFilePath)
+        // CRITICAL FIX: Accepts the persistent reader instead of reopening the file path
+        public long GetTotalSamples(AudioFileReader reader)
         {
-            using var reader = new AudioFileReader(wavFilePath);
             return reader.Length / (reader.WaveFormat.BitsPerSample / 8);
         }
 
@@ -76,7 +76,8 @@ namespace VocalPure.Services
             return (int)(totalPadded / GenSize);
         }
 
-        public float[] ReadAndTransformChunk(string wavFilePath, int chunkIndex)
+        // CRITICAL FIX: Utilizes the shared reader, moving the read position seamlessly
+        public float[] ReadAndTransformChunk(AudioFileReader reader, int chunkIndex)
         {
             if (_isDisposed) throw new ObjectDisposedException(nameof(AudioChunker));
 
@@ -90,22 +91,19 @@ namespace VocalPure.Services
             long fileStart = Math.Max(0, readStart);
             int trimStart = (int)(fileStart - readStart); 
 
-            using (var reader = new AudioFileReader(wavFilePath))
+            long fileTotalPerChannel = reader.Length / reader.WaveFormat.BlockAlign;
+            long fileSamplesToRead = Math.Min(ChunkSize - trimStart, fileTotalPerChannel - fileStart);
+            
+            if (fileSamplesToRead > 0)
             {
-                long fileTotalPerChannel = reader.Length / reader.WaveFormat.BlockAlign;
-                long fileSamplesToRead = Math.Min(ChunkSize - trimStart, fileTotalPerChannel - fileStart);
+                reader.Position = fileStart * reader.WaveFormat.BlockAlign;
+                int floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
                 
-                if (fileSamplesToRead > 0)
+                int validSamples = floatsRead / _channels;
+                for (int i = 0; i < validSamples; i++)
                 {
-                    reader.Position = fileStart * reader.WaveFormat.BlockAlign;
-                    int floatsRead = reader.Read(_readBuffer, 0, (int)fileSamplesToRead * _channels);
-                    
-                    int validSamples = floatsRead / _channels;
-                    for (int i = 0; i < validSamples; i++)
-                    {
-                        _leftBuf[trimStart + i] = _readBuffer[i * _channels];
-                        _rightBuf[trimStart + i] = _channels > 1 ? _readBuffer[i * _channels + 1] : _readBuffer[i * _channels];
-                    }
+                    _leftBuf[trimStart + i] = _readBuffer[i * _channels];
+                    _rightBuf[trimStart + i] = _channels > 1 ? _readBuffer[i * _channels + 1] : _readBuffer[i * _channels];
                 }
             }
 
