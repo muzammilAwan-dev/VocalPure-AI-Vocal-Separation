@@ -13,9 +13,11 @@ namespace VocalPure.Models
         public string ModelPath { get; set; } = string.Empty;
         public int ParallelWorkers { get; set; } = 1;
         
-        // ULTIMATE FIX: Hardcode to 1. 
-        // Prevents ONNX from duplicating the 500MB memory arena across multiple CPU cores.
-        public int IntraOpNumThreads { get; set; } = 1; 
+        // THE UNLOCK: Set to 0 to let ONNX auto-scale to 100% of available CPU cores.
+        // We can safely do this now because EnableCpuMemArena=false prevents the RAM explosion.
+        public int IntraOpNumThreads { get; set; } = 0; 
+        
+        // InterOp remains 1. This prevents multiple chunks from processing at the exact same time.
         public int InterOpNumThreads { get; set; } = 1; 
 
         public bool UseGpuBuffer { get; set; } = false;
@@ -38,7 +40,7 @@ namespace VocalPure.Models
                 OverlapSeconds = 1,
                 SampleRate = 44100,
                 Channels = 2,
-                IntraOpNumThreads = 1,  
+                IntraOpNumThreads = 0,  // 0 = Max Cores
                 InterOpNumThreads = 1,
                 ParallelWorkers = 1,    
                 UseGpuBuffer = false
