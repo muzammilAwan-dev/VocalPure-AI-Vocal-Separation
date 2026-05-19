@@ -317,7 +317,7 @@
 
                     <TextBlock Grid.Column="3"
                                Style="{StaticResource MutedText}"
-                               Visibility="{Binding ActiveJob.EstimatedRemaining, Converter={StaticResource BoolToVis}}">
+                               Visibility="{Binding ActiveJob.EstimatedRemaining, Converter={StaticResource NullToVis}}">
                         <TextBlock.Text>
                             <MultiBinding StringFormat="ETC {0}">
                                 <Binding Path="ActiveJob.EstimatedRemaining" Converter="{StaticResource TimeSpanToStr}"/>
@@ -451,14 +451,13 @@
                                        Foreground="{StaticResource TextSecondary}"/>
                         </Border>
 
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                            <TextBox Style="{StaticResource LogTextBox}"
-                                     Text="{Binding ActiveJob.DetailedLog, FallbackValue='Ready to process...', Mode=OneWay}"
-                                     BorderThickness="0"
-                                     Background="Transparent"
-                                     Margin="4"
-                                     TextChanged="LogTextBox_TextChanged"/>
-                        </ScrollViewer>
+                        <TextBox Grid.Row="1"
+                                 Style="{StaticResource LogTextBox}"
+                                 Text="{Binding ActiveJob.DetailedLog, FallbackValue='Ready to process...', Mode=OneWay}"
+                                 BorderThickness="0"
+                                 Background="Transparent"
+                                 Margin="4"
+                                 TextChanged="LogTextBox_TextChanged"/>
                     </Grid>
                 </Border>
             </Grid>
