@@ -112,18 +112,27 @@ namespace VocalPure.Services
             int totalChunks = chunker.GetChunkCount(totalSamples);
             long remainingSamples = totalSamples; 
 
-            Log.Information("=== DIRECT DISK TELEMETRY INITIALIZED ===");
-            Log.Information("Format: [Chunk] | Disk Read | ONNX Math | ISTFT Math | Disk Write");
+            Log.Information("=== ADVANCED HARDWARE TELEMETRY INITIALIZED ===");
+            Log.Information("Format: [Chunk] | Read | ONNX | ISTFT | Write || CPU % | RAM MB");
             progress?.Report((0, 0, totalChunks, _activeExecutionProvider));
 
             using var outputWriter = chunker.CreateStreamWriter(outputVocalsPath);
+            
+            // Profiling Stopwatches
             Stopwatch telemetrySw = new Stopwatch();
+            Stopwatch realTimeSw = Stopwatch.StartNew();
+            using Process currentProcess = Process.GetCurrentProcess();
 
             for (int i = 0; i < totalChunks; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report(((double)i / totalChunks, i + 1, totalChunks, _activeExecutionProvider));
 
+                // Capture baseline hardware stats before the chunk starts
+                TimeSpan startCpuTime = currentProcess.TotalProcessorTime;
+                long startRealTime = realTimeSw.ElapsedMilliseconds;
+
+                // --- PIPELINE EXECUTION ---
                 telemetrySw.Restart();
                 float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(inputWavPath, i), cancellationToken);
                 long readTime = telemetrySw.ElapsedMilliseconds;
@@ -140,8 +149,22 @@ namespace VocalPure.Services
                 chunker.WriteChunkToStream(outputWriter, audioChunk, ref remainingSamples);
                 long writeTime = telemetrySw.ElapsedMilliseconds;
 
-                Log.Information("[TELEMETRY] Chunk {Chunk:D3} | Read: {Read:D4}ms | ONNX: {Onnx:D4}ms | ISTFT: {Istft:D4}ms | Write: {Write:D4}ms",
-                    i + 1, readTime, onnxTime, istftTime, writeTime);
+                // --- HARDWARE CALCULATION ---
+                TimeSpan endCpuTime = currentProcess.TotalProcessorTime;
+                long endRealTime = realTimeSw.ElapsedMilliseconds;
+
+                double cpuUsedMs = (endCpuTime - startCpuTime).TotalMilliseconds;
+                double realPassedMs = endRealTime - startRealTime;
+                
+                // Calculate actual CPU % relative to the number of logical cores available
+                double cpuPercent = (cpuUsedMs / (Environment.ProcessorCount * Math.Max(1, realPassedMs))) * 100;
+
+                // Refresh process data to get the active RAM Working Set
+                currentProcess.Refresh();
+                long ramMb = currentProcess.WorkingSet64 / (1024 * 1024);
+
+                Log.Information("[TELEMETRY] Chunk {Chunk:D3} | Read: {Read:D4}ms | ONNX: {Onnx:D4}ms | ISTFT: {Istft:D4}ms | Write: {Write:D4}ms || CPU: {Cpu:00.0}% | RAM: {Ram} MB",
+                    i + 1, readTime, onnxTime, istftTime, writeTime, cpuPercent, ramMb);
 
                 GC.Collect(2, GCCollectionMode.Optimized, false);
             }
