@@ -170,6 +170,9 @@ namespace VocalPure.Services
                     }
                 };
 
+                // CRITICAL FIX: Silently drain the standard output so the 4KB buffer never overflows and hangs the app.
+                _activeProcess.OutputDataReceived += (_, _) => { };
+
                 _activeProcess.Start();
                 _activeProcess.BeginErrorReadLine();
                 _activeProcess.BeginOutputReadLine();
