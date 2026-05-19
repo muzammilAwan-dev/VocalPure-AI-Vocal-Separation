@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,6 +10,7 @@ namespace VocalPure.Services
 {
     public sealed class MediaProcessor : IDisposable
     {
+        private Process? _activeProcess;
         private readonly DependencyManager _dependencyManager;
         private bool _isDisposed;
 
@@ -17,105 +19,209 @@ namespace VocalPure.Services
             _dependencyManager = new DependencyManager();
         }
 
-        /// <summary>
-        /// PIPELINE: Opens a background FFmpeg process that decodes an audio/video file 
-        /// and streams raw 32-bit float PCM data directly to stdout.
-        /// </summary>
-        public Process StartFfmpegDecodeStream(string inputPath)
+        public async Task ExtractAudioToWavAsync(
+            string inputPath,
+            string outputWavPath,
+            CancellationToken cancellationToken,
+            IProgress<double>? progress = null)
         {
             EnsureNotDisposed();
 
-            var psi = new ProcessStartInfo
+            var arguments = new[]
             {
-                FileName = GetFfmpegPath(),
-                CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true, // Silenced in background
-                WindowStyle = ProcessWindowStyle.Hidden
+                "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                "-i", inputPath, "-vn",
+                "-acodec", "pcm_f32le", "-ar", "44100", "-ac", "2",
+                "-f", "wav", outputWavPath
             };
 
-            psi.ArgumentList.Add("-v"); psi.ArgumentList.Add("error");
-            psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(inputPath);
-            psi.ArgumentList.Add("-vn"); // No video
-            psi.ArgumentList.Add("-f"); psi.ArgumentList.Add("f32le");
-            psi.ArgumentList.Add("-acodec"); psi.ArgumentList.Add("pcm_f32le");
-            psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("44100");
-            psi.ArgumentList.Add("-ac"); psi.ArgumentList.Add("2");
-            psi.ArgumentList.Add("-"); // Stream directly to StandardOutput
-
-            var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            process.Start();
-            return process;
+            await RunFfmpegAsync(arguments, cancellationToken, progress, ParseConvertProgress);
         }
 
-        /// <summary>
-        /// PIPELINE: Opens a background FFmpeg process that waits for raw 32-bit float PCM data 
-        /// to be piped into its stdin, encoding it directly to the final file.
-        /// </summary>
-        public Process StartFfmpegEncodeStream(string originalVideoPath, string outputPath, bool isVideo)
+        public async Task EncodeToMp3Async(
+            string inputWavPath,
+            string outputMp3Path,
+            CancellationToken cancellationToken,
+            int bitrateKbps = 320,
+            IProgress<double>? progress = null)
         {
             EnsureNotDisposed();
 
-            var psi = new ProcessStartInfo
+            var arguments = new[]
             {
-                FileName = GetFfmpegPath(),
-                CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardError = true,
-                WindowStyle = ProcessWindowStyle.Hidden
+                "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                "-i", inputWavPath,
+                "-codec:a", "libmp3lame", "-b:a", $"{bitrateKbps}k",
+                "-q:a", "0", "-map_metadata", "-1",
+                "-id3v2_version", "3", "-write_id3v1", "1",
+                outputMp3Path
             };
 
-            psi.ArgumentList.Add("-y");
-            psi.ArgumentList.Add("-v"); psi.ArgumentList.Add("error");
+            await RunFfmpegAsync(arguments, cancellationToken, progress, ParseConvertProgress);
+        }
 
-            if (isVideo)
+        public async Task EncodeAudioAsync(
+            string inputWavPath,
+            string outputPath,
+            CancellationToken cancellationToken,
+            IProgress<double>? progress = null)
+        {
+            string ext = Path.GetExtension(outputPath).ToLowerInvariant();
+            if (ext == ".mp3")
             {
-                psi.ArgumentList.Add("-i"); psi.ArgumentList.Add(originalVideoPath); // Input 0 (Video)
-                
-                psi.ArgumentList.Add("-f"); psi.ArgumentList.Add("f32le");
-                psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("44100");
-                psi.ArgumentList.Add("-ac"); psi.ArgumentList.Add("2");
-                psi.ArgumentList.Add("-i"); psi.ArgumentList.Add("-"); // Input 1 (Stdin Audio)
-
-                psi.ArgumentList.Add("-map"); psi.ArgumentList.Add("0:v:0");
-                psi.ArgumentList.Add("-map"); psi.ArgumentList.Add("1:a:0");
-                psi.ArgumentList.Add("-c:v"); psi.ArgumentList.Add("copy");
-                psi.ArgumentList.Add("-c:a"); psi.ArgumentList.Add("aac");
-                psi.ArgumentList.Add("-b:a"); psi.ArgumentList.Add("320k");
-                psi.ArgumentList.Add("-shortest");
+                await EncodeToMp3Async(inputWavPath, outputPath, cancellationToken, 320, progress);
             }
             else
             {
-                psi.ArgumentList.Add("-f"); psi.ArgumentList.Add("f32le");
-                psi.ArgumentList.Add("-ar"); psi.ArgumentList.Add("44100");
-                psi.ArgumentList.Add("-ac"); psi.ArgumentList.Add("2");
-                psi.ArgumentList.Add("-i"); psi.ArgumentList.Add("-"); // Input 0 (Stdin Audio)
-
-                string ext = Path.GetExtension(outputPath).ToLowerInvariant();
-                if (ext == ".mp3")
-                {
-                    psi.ArgumentList.Add("-codec:a"); psi.ArgumentList.Add("libmp3lame");
-                    psi.ArgumentList.Add("-b:a"); psi.ArgumentList.Add("320k");
-                }
-                else
-                {
-                    psi.ArgumentList.Add("-acodec"); psi.ArgumentList.Add("pcm_f32le");
-                }
+                await EncodeToWavAsync(inputWavPath, outputPath, cancellationToken, progress);
             }
+        }
 
-            psi.ArgumentList.Add(outputPath);
+        public async Task EncodeToWavAsync(
+            string inputWavPath,
+            string outputWavPath,
+            CancellationToken cancellationToken,
+            IProgress<double>? progress = null)
+        {
+            EnsureNotDisposed();
 
-            var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-            process.Start();
-            return process;
+            var arguments = new[]
+            {
+                "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                "-i", inputWavPath,
+                "-acodec", "pcm_f32le", "-ar", "44100", "-ac", "2",
+                "-f", "wav", outputWavPath
+            };
+
+            await RunFfmpegAsync(arguments, cancellationToken, progress, ParseConvertProgress);
+        }
+
+        public async Task MergeVideoWithAudioAsync(
+            string originalVideoPath,
+            string newAudioPath,
+            string outputPath,
+            CancellationToken cancellationToken,
+            IProgress<double>? progress = null)
+        {
+            EnsureNotDisposed();
+
+            var arguments = new[]
+            {
+                "-y", "-hide_banner", "-loglevel", "error", "-stats",
+                "-i", originalVideoPath, "-i", newAudioPath,
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-shortest", "-movflags", "+faststart", "-fflags", "+genpts",
+                "-async", "1", outputPath
+            };
+
+            await RunFfmpegAsync(arguments, cancellationToken, progress, ParseConvertProgress);
+        }
+
+        private async Task RunFfmpegAsync(
+            string[] arguments,
+            CancellationToken cancellationToken,
+            IProgress<double>? progress,
+            Func<string, double, double> progressParser)
+        {
+            string ffmpegPath = GetFfmpegPath();
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = Path.GetDirectoryName(ffmpegPath) ?? Environment.CurrentDirectory
+            };
+
+            foreach (var arg in arguments) psi.ArgumentList.Add(arg);
+
+            var processCompletion = new TaskCompletionSource<bool>();
+            _activeProcess = new Process { StartInfo = psi, EnableRaisingEvents = true };
+            _activeProcess.Exited += (_, _) => processCompletion.TrySetResult(true);
+
+            using (cancellationToken.Register(() =>
+            {
+                processCompletion.TrySetCanceled();
+                KillActiveProcess();
+            }))
+            {
+                var errorBuffer = new StringBuilder();
+                var lockObj = new object();
+                double lastProgress = 0;
+
+                _activeProcess.ErrorDataReceived += (_, e) =>
+                {
+                    if (string.IsNullOrWhiteSpace(e.Data)) return;
+
+                    lock (lockObj) { errorBuffer.AppendLine(e.Data); }
+
+                    if (progress != null)
+                    {
+                        double parsedProgress = progressParser(e.Data, lastProgress);
+                        if (parsedProgress > lastProgress)
+                        {
+                            lastProgress = parsedProgress;
+                            progress.Report(Math.Min(1.0, parsedProgress));
+                        }
+                    }
+                };
+
+                _activeProcess.Start();
+                _activeProcess.BeginErrorReadLine();
+                _activeProcess.BeginOutputReadLine();
+
+                try { await processCompletion.Task; }
+                catch (OperationCanceledException) { throw; }
+
+                if (_activeProcess.ExitCode != 0)
+                {
+                    string errorMessage;
+                    lock (lockObj)
+                    {
+                        errorMessage = errorBuffer.Length > 500
+                            ? errorBuffer.ToString(errorBuffer.Length - 500, 500)
+                            : errorBuffer.ToString();
+                    }
+                    throw new InvalidOperationException($"FFmpeg exited with code {_activeProcess.ExitCode}. Error: {errorMessage}");
+                }
+
+                progress?.Report(1.0);
+            }
+        }
+
+        private static double ParseConvertProgress(string line, double currentProgress)
+        {
+            var timeMatch = Regex.Match(line, @"time=(\d{2}):(\d{2}):(\d{2}\.\d+)");
+            if (timeMatch.Success)
+            {
+                double hours = double.Parse(timeMatch.Groups[1].Value);
+                double minutes = double.Parse(timeMatch.Groups[2].Value);
+                double seconds = double.Parse(timeMatch.Groups[3].Value);
+                double totalSeconds = hours * 3600 + minutes * 60 + seconds;
+                return Math.Min(totalSeconds / 300.0, 0.99); // Fallback assumption
+            }
+            if (Regex.IsMatch(line, @"frame=\s*(\d+)")) return currentProgress + 0.001;
+            return currentProgress;
         }
 
         private string GetFfmpegPath()
         {
             if (File.Exists(_dependencyManager.FFmpegPath)) return _dependencyManager.FFmpegPath;
             return "ffmpeg.exe";
+        }
+
+        private void KillActiveProcess()
+        {
+            try
+            {
+                _activeProcess?.Kill();
+                _activeProcess?.WaitForExit(5000);
+            }
+            catch { }
         }
 
         private void EnsureNotDisposed()
@@ -125,7 +231,10 @@ namespace VocalPure.Services
 
         public void Dispose()
         {
+            if (_isDisposed) return;
             _isDisposed = true;
+            KillActiveProcess();
+            _activeProcess?.Dispose();
         }
     }
 }
