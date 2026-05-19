@@ -19,6 +19,7 @@ namespace VocalPure.Services
         private string? _currentModelPath;
         private string _activeExecutionProvider;
         private bool _isDisposed;
+        private int _currentIntraOpThreads = -1; // Tracks thread count to force reload if toggled
 
         public string ActiveExecutionProvider => _activeExecutionProvider;
 
@@ -49,7 +50,9 @@ namespace VocalPure.Services
             if (_isDisposed) throw new ObjectDisposedException(nameof(InferenceEngine));
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (_session != null && _currentModelPath == modelPath) return;
+            // CRITICAL FIX: Also check if the thread count changed. If so, force a reload.
+            if (_session != null && _currentModelPath == modelPath && _currentIntraOpThreads == _settings.IntraOpNumThreads) 
+                return;
 
             _session?.Dispose();
             _session = null;
@@ -72,12 +75,9 @@ namespace VocalPure.Services
                     {
                         LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
                         GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
-                        
-                        // CRITICAL FIX: Properly map thread counts and dynamic execution modes
                         ExecutionMode = providerName == "CPU" ? ExecutionMode.ORT_PARALLEL : ExecutionMode.ORT_SEQUENTIAL,
                         IntraOpNumThreads = providerName == "CPU" ? _settings.IntraOpNumThreads : 1,
                         InterOpNumThreads = _settings.InterOpNumThreads,
-                        
                         EnableCpuMemArena = false,
                         EnableMemoryPattern = false
                     };
@@ -88,15 +88,14 @@ namespace VocalPure.Services
                     _session = new InferenceSession(modelPath, testOptions);
                     _currentModelPath = modelPath;
                     _activeExecutionProvider = providerName;
+                    _currentIntraOpThreads = _settings.IntraOpNumThreads; // Save current state
 
-                    // CRITICAL FIX: GPU Warmup pass to eliminate the 10-second stall on chunk 1
                     if (providerName != "CPU")
                     {
                         Log.Information("Performing GPU kernel warmup pass...");
                         var warmupData = new float[4 * 3072 * 256];
                         RunInference(warmupData, _session.InputMetadata.Keys.First(), _session.OutputMetadata.Keys.First());
                     }
-
                     return;
                 }
                 catch { continue; }
@@ -185,8 +184,6 @@ namespace VocalPure.Services
 
             var inputTensor = new DenseTensor<float>(tensorData, new[] { 1, 4, 3072, 256 });
             using var results = _session.Run(new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputName, inputTensor) });
-            
-            // CRITICAL FIX: Safe memory allocation per-chunk prevents batched-mode memory corruption
             return results.First(r => r.Name == outputName).AsTensor<float>().ToArray();
         }
 
