@@ -36,7 +36,9 @@ namespace VocalPure.ViewModels
         public MainViewModel()
         {
             _dependencyManager = new DependencyManager();
-            _mediaProcessor = new MediaProcessor();
+            // CRITICAL FIX: Wire DependencyManager directly into MediaProcessor
+            _mediaProcessor = new MediaProcessor(_dependencyManager);
+            
             _inferenceSettings = InferenceSettings.CreateDefault();
             _inferenceEngine = new InferenceEngine(_inferenceSettings);
             _settingsManager = new AppSettingsManager();
@@ -163,26 +165,17 @@ namespace VocalPure.ViewModels
                     Filter = "Media Files|*.mp3;*.wav;*.flac;*.aac;*.ogg;*.m4a;*.wma;*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm|All Files|*.*",
                     Multiselect = true
                 };
-
                 if (dialog.ShowDialog() == true) await HandleDroppedFilesAsync(dialog.FileNames);
             }
             catch (Exception ex)
             {
                 Log.Error(ex, "Failed to browse files");
-                MessageBox.Show($"Error opening file browser: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
         private void OnChangeOutputFolder()
         {
-            var dialog = new OpenFolderDialog
-            {
-                Title = "Select Default Output Folder",
-                InitialDirectory = string.IsNullOrWhiteSpace(CustomOutputFolder) 
-                    ? Environment.GetFolderPath(Environment.SpecialFolder.Desktop) 
-                    : CustomOutputFolder
-            };
-
+            var dialog = new OpenFolderDialog { Title = "Select Default Output Folder", InitialDirectory = string.IsNullOrWhiteSpace(CustomOutputFolder) ? Environment.GetFolderPath(Environment.SpecialFolder.Desktop) : CustomOutputFolder };
             if (dialog.ShowDialog() == true) CustomOutputFolder = dialog.FolderName;
         }
 
@@ -203,7 +196,6 @@ namespace VocalPure.ViewModels
             }
         }
 
-        // CRITICAL FIX: Loop iteration rather than tail-call recursion
         private async Task RunProcessingLoopAsync()
         {
             try
@@ -212,14 +204,12 @@ namespace VocalPure.ViewModels
                 {
                     var job = JobQueue.FirstOrDefault(j => j.Phase == ProcessingPhase.Idle);
                     if (job == null) break;
-
                     await ProcessSingleJobAsync(job);
                 }
             }
             finally
             {
                 IsProcessing = false;
-
                 if (Application.Current?.Dispatcher != null)
                 {
                     await Application.Current.Dispatcher.InvokeAsync(() =>
@@ -237,7 +227,6 @@ namespace VocalPure.ViewModels
             _currentCts = new CancellationTokenSource();
             CancellationToken token = _currentCts.Token;
             string tempDir = Path.Combine(Path.GetTempPath(), "VocalPure", job.Id);
-            
             Log.Information("Starting job ID: {JobId} for file: {FileName}", job.Id, job.FileName);
 
             try
@@ -331,13 +320,11 @@ namespace VocalPure.ViewModels
                 _currentCts?.Dispose();
                 _currentCts = null;
 
-                // CRITICAL FIX: Safe UI Thread dispatching for post-job UI refreshes
+                // CRITICAL FIX: Removed GC.Collect() triple-threat to prevent CLR thread blocking
+
                 if (Application.Current?.Dispatcher != null)
                 {
-                    await Application.Current.Dispatcher.InvokeAsync(() =>
-                    {
-                        ClearCompletedCommand.RaiseCanExecuteChanged();
-                    });
+                    await Application.Current.Dispatcher.InvokeAsync(() => ClearCompletedCommand.RaiseCanExecuteChanged());
                 }
             }
         }
@@ -364,8 +351,10 @@ namespace VocalPure.ViewModels
                 : CustomOutputFolder;
 
             string baseName = Path.GetFileNameWithoutExtension(job.FileName);
-            string ext = job.IsVideoOutput ? ".mp4" : Path.GetExtension(job.InputFilePath).ToLowerInvariant();
-            if (string.IsNullOrEmpty(ext)) ext = ".wav";
+            
+            // CRITICAL FIX: Match output extension to requested encode format, not original container
+            string inputExt = Path.GetExtension(job.InputFilePath).ToLowerInvariant();
+            string ext = job.IsVideoOutput ? ".mp4" : (inputExt == ".mp3" ? ".mp3" : ".wav");
             
             string suffix = "_vocals";
             string outputPath = Path.Combine(dir, $"{baseName}{suffix}{ext}");
@@ -388,7 +377,7 @@ namespace VocalPure.ViewModels
                 {
                     foreach (string file in Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories))
                     {
-                        try { File.Delete(file); } catch { /* best effort */ }
+                        try { File.Delete(file); } catch { }
                     }
                     Directory.Delete(tempDir, true);
                 }
@@ -431,11 +420,7 @@ namespace VocalPure.ViewModels
 
         private void OnOpenGitHub()
         {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = "https://github.com/muzammilAwan-dev", UseShellExecute = true });
-            }
-            catch { }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = "https://github.com/muzammilAwan-dev", UseShellExecute = true }); } catch { }
         }
 
         private static void OnOpenOutputFolder(string? path)
@@ -448,14 +433,10 @@ namespace VocalPure.ViewModels
             }
         }
 
-        private void OnElapsedTimerTick(object? sender, EventArgs e)
-        {
-            if (ActiveJob != null && ActiveJob.StartTime != DateTime.MinValue) ActiveJob.Elapsed = DateTime.Now - ActiveJob.StartTime;
-        }
+        private void OnElapsedTimerTick(object? sender, EventArgs e) { if (ActiveJob != null && ActiveJob.StartTime != DateTime.MinValue) ActiveJob.Elapsed = DateTime.Now - ActiveJob.StartTime; }
 
         #region INotifyPropertyChanged
         public event PropertyChangedEventHandler? PropertyChanged;
-        
         private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
         {
             if (EqualityComparer<T>.Default.Equals(field, value)) return false;
@@ -463,7 +444,6 @@ namespace VocalPure.ViewModels
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
             return true;
         }
-
         private void OnPropertyChanged([CallerMemberName] string propertyName = "") => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         #endregion
 
