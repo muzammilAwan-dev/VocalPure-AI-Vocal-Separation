@@ -345,43 +345,57 @@
                 Margin="20,12,20,0"
                 Padding="12,8">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                
-                <TextBlock Grid.Column="0" 
-                           Text="Output Destination:" 
-                           Style="{StaticResource SubHeaderText}" 
-                           FontSize="12" 
-                           VerticalAlignment="Center" 
-                           Margin="0,0,8,0"/>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-                <TextBlock Grid.Column="1" 
-                           Text="{Binding DisplayOutputFolder}" 
-                           Style="{StaticResource MutedText}" 
-                           Foreground="{StaticResource TextAccent}"
-                           VerticalAlignment="Center" 
-                           TextTrimming="CharacterEllipsis"/>
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    
+                    <TextBlock Grid.Column="0" 
+                               Text="Output Destination:" 
+                               Style="{StaticResource SubHeaderText}" 
+                               FontSize="12" 
+                               VerticalAlignment="Center" 
+                               Margin="0,0,8,0"/>
 
-                <Button Grid.Column="2" 
-                        Content="Change Folder" 
-                        Style="{StaticResource SecondaryButton}" 
-                        FontSize="11" 
-                        Padding="10,4" 
-                        Margin="12,0,0,0"
-                        Command="{Binding ChangeOutputFolderCommand}"/>
+                    <TextBlock Grid.Column="1" 
+                               Text="{Binding DisplayOutputFolder}" 
+                               Style="{StaticResource MutedText}" 
+                               Foreground="{StaticResource TextAccent}"
+                               VerticalAlignment="Center" 
+                               TextTrimming="CharacterEllipsis"/>
 
-                <Button Grid.Column="3" 
-                        Content="Reset" 
-                        Style="{StaticResource DangerButton}" 
-                        FontSize="11" 
-                        Padding="10,4" 
-                        Margin="8,0,0,0"
-                        Command="{Binding ResetOutputFolderCommand}"
-                        Visibility="{Binding HasCustomOutputFolder, Converter={StaticResource BoolToVis}}"/>
+                    <Button Grid.Column="2" 
+                            Content="Change Folder" 
+                            Style="{StaticResource SecondaryButton}" 
+                            FontSize="11" 
+                            Padding="10,4" 
+                            Margin="12,0,0,0"
+                            Command="{Binding ChangeOutputFolderCommand}"/>
+
+                    <Button Grid.Column="3" 
+                            Content="Reset" 
+                            Style="{StaticResource DangerButton}" 
+                            FontSize="11" 
+                            Padding="10,4" 
+                            Margin="8,0,0,0"
+                            Command="{Binding ResetOutputFolderCommand}"
+                            Visibility="{Binding HasCustomOutputFolder, Converter={StaticResource BoolToVis}}"/>
+                </Grid>
+
+                <Grid Grid.Row="1" Margin="0,12,0,4">
+                    <CheckBox Content="Aggressive CPU Mode (Maximize processing speed)"
+                              IsChecked="{Binding AggressiveCpuMode}"
+                              Foreground="{StaticResource TextSecondary}"
+                              ToolTip="Forces the AI engine to utilize 100% of logical CPU cores. Much faster, but may slow down other PC tasks during separation." />
+                </Grid>
             </Grid>
         </Border>
 
