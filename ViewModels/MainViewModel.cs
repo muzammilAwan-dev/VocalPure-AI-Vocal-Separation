@@ -60,7 +60,6 @@ namespace VocalPure.ViewModels
             
             RemoveJobCommand = new RelayCommand<SeparationJob>(OnRemoveJob, job => job != null && job.Phase == ProcessingPhase.Idle);
             OpenGitHubCommand = new RelayCommand(OnOpenGitHub);
-            
             ChangeOutputFolderCommand = new RelayCommand(OnChangeOutputFolder);
             ResetOutputFolderCommand = new RelayCommand(OnResetOutputFolder);
 
@@ -201,57 +200,92 @@ namespace VocalPure.ViewModels
             IsProcessing = true;
             _currentCts = new CancellationTokenSource();
             CancellationToken token = _currentCts.Token;
+            string tempDir = Path.Combine(Path.GetTempPath(), "VocalPure", job.Id);
             
+            Log.Information("Starting job ID: {JobId} for file: {FileName}", job.Id, job.FileName);
+
             try
             {
                 job.StartTime = DateTime.Now;
                 job.IsActive = true;
+                job.Phase = ProcessingPhase.Initializing;
+                job.AppendLog($"Starting processing: {job.FileName}");
                 _elapsedTimer.Start();
 
-                string outputPath = GenerateOutputPath(job);
+                var progress = new Progress<(ProcessingPhase phase, double phaseProgress, string message)>(update =>
+                {
+                    job.Phase = update.phase;
+                    job.CurrentPhaseProgress = update.phaseProgress;
+                    if (!string.IsNullOrEmpty(update.message)) job.AppendLog(update.message);
+                    job.OverallProgress = CalculateOverallProgress(update.phase, update.phaseProgress);
+                });
+
+                job.Phase = ProcessingPhase.ExtractingAudio;
+                string wavPath = Path.Combine(tempDir, "input.wav");
+                Directory.CreateDirectory(tempDir);
+
+                job.AppendLog("Phase 1: Extracting audio with FFmpeg...");
+                var extractReporter = new Progress<double>(p => ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.ExtractingAudio, p, $"FFmpeg extraction: {p:P0}")));
+                await _mediaProcessor.ExtractAudioToWavAsync(job.InputFilePath, wavPath, token, extractReporter);
+                token.ThrowIfCancellationRequested();
+
+                job.Phase = ProcessingPhase.LoadingModel;
+                job.AppendLog("Phase 2: Loading ONNX model...");
+                string vocalsWavPath = Path.Combine(tempDir, "vocals.wav");
                 string modelPath = _inferenceSettings.ModelPath;
 
                 if (!File.Exists(modelPath)) throw new FileNotFoundException($"ONNX model not found: {modelPath}");
 
-                job.Phase = ProcessingPhase.Initializing;
-                job.AppendLog($"Initiating Zero-Disk Streaming Pipeline for: {job.FileName}");
-
-                var progress = new Progress<(double chunkProgress, int currentChunk, int totalChunks, string executionProvider)>(update =>
+                var inferenceReporter = new Progress<(double chunkProgress, int currentChunk, int totalChunks, string executionProvider)>(update =>
                 {
                     job.ExecutionProvider = update.executionProvider;
-                    job.Phase = ProcessingPhase.ProcessingInference;
                     double phaseProgress = update.totalChunks > 0 ? (double)update.currentChunk / update.totalChunks : 0;
-                    job.CurrentPhaseProgress = phaseProgress;
-                    job.OverallProgress = phaseProgress * 0.95; // 95% of the total visual bar
-                    
-                    if (update.currentChunk == 1) job.AppendLog("Pipeline Active: Producer, AI, and Consumer threads running concurrently...");
+                    ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.ProcessingInference, phaseProgress, $"Processing chunk {update.currentChunk}/{update.totalChunks} [{update.executionProvider}]"));
                 });
 
-                // THE MASTER CALL: One method handles everything concurrently.
-                await _inferenceEngine.SeparateVocalsAsync(
-                    _mediaProcessor, 
-                    job.InputFilePath, 
-                    outputPath, 
-                    job.IsVideoOutput, 
-                    modelPath, 
-                    token, 
-                    progress);
+                await _inferenceEngine.SeparateVocalsAsync(wavPath, vocalsWavPath, modelPath, token, inferenceReporter);
+                token.ThrowIfCancellationRequested();
+
+                job.Phase = ProcessingPhase.MergingOutput;
+                job.AppendLog("Phase 3: Encoding final output...");
+                string outputPath = GenerateOutputPath(job);
+                
+                var mergeReporter = new Progress<double>(p => ((IProgress<(ProcessingPhase, double, string)>)progress).Report((ProcessingPhase.MergingOutput, p, $"FFmpeg encode: {p:P0}")));
+
+                if (job.IsVideoOutput)
+                {
+                    await _mediaProcessor.MergeVideoWithAudioAsync(job.InputFilePath, vocalsWavPath, outputPath, token, mergeReporter);
+                }
+                else
+                {
+                    await _mediaProcessor.EncodeAudioAsync(vocalsWavPath, outputPath, token, mergeReporter);
+                }
 
                 job.OutputFilePath = outputPath;
+                job.AppendLog($"Output saved: {outputPath}");
+
+                job.Phase = ProcessingPhase.CleaningUp;
+                job.AppendLog("Phase 4: Cleaning up temporary files...");
+                CleanupTempDirectory(tempDir);
+
                 job.Phase = ProcessingPhase.Completed;
-                job.OverallProgress = 1.0;
-                job.AppendLog($"Processing completed! Output saved: {outputPath}");
+                job.AppendLog("Processing completed successfully!");
+                Log.Information("Job completed successfully: {JobId}", job.Id);
             }
             catch (OperationCanceledException)
             {
                 job.Phase = ProcessingPhase.Cancelled;
-                job.AppendLog("Processing cancelled by user.");
+                job.AppendLog("Processing cancelled.");
+                Log.Warning("Job cancelled: {JobId}", job.Id);
+                CleanupTempDirectory(tempDir);
             }
             catch (Exception ex)
             {
                 job.Phase = ProcessingPhase.Error;
                 job.ErrorMessage = ex.Message;
                 job.AppendLog($"ERROR: {ex.Message}");
+                Log.Error(ex, "Job failed: {JobId}", job.Id);
+                CleanupTempDirectory(tempDir);
             }
             finally
             {
@@ -262,7 +296,6 @@ namespace VocalPure.ViewModels
                 _currentCts?.Dispose();
                 _currentCts = null;
 
-                // Final aggressive system sweep
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
@@ -272,6 +305,21 @@ namespace VocalPure.ViewModels
 
                 if (JobQueue.Any(j => j.Phase == ProcessingPhase.Idle)) await ProcessNextJobAsync();
             }
+        }
+
+        private static double CalculateOverallProgress(ProcessingPhase phase, double phaseProgress)
+        {
+            return phase switch
+            {
+                ProcessingPhase.Initializing => 0.0,
+                ProcessingPhase.ExtractingAudio => 0.05 + (phaseProgress * 0.15),
+                ProcessingPhase.LoadingModel => 0.20,
+                ProcessingPhase.ProcessingInference => 0.25 + (phaseProgress * 0.55),
+                ProcessingPhase.MergingOutput => 0.80 + (phaseProgress * 0.15),
+                ProcessingPhase.CleaningUp => 0.96,
+                ProcessingPhase.Completed => 1.0,
+                _ => 0.0
+            };
         }
 
         private string GenerateOutputPath(SeparationJob job)
@@ -295,6 +343,25 @@ namespace VocalPure.ViewModels
             }
 
             return outputPath;
+        }
+
+        private static void CleanupTempDirectory(string tempDir)
+        {
+            try
+            {
+                if (Directory.Exists(tempDir))
+                {
+                    foreach (string file in Directory.GetFiles(tempDir, "*", SearchOption.AllDirectories))
+                    {
+                        try { File.Delete(file); } catch { /* best effort */ }
+                    }
+                    Directory.Delete(tempDir, true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Failed to fully clean temporary directory: {TempDir}", tempDir);
+            }
         }
 
         private void OnCancel()
