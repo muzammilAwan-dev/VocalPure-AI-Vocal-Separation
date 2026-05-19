@@ -36,12 +36,16 @@ namespace VocalPure.ViewModels
         public MainViewModel()
         {
             _dependencyManager = new DependencyManager();
-            // CRITICAL FIX: Wire DependencyManager directly into MediaProcessor
             _mediaProcessor = new MediaProcessor(_dependencyManager);
             
             _inferenceSettings = InferenceSettings.CreateDefault();
             _inferenceEngine = new InferenceEngine(_inferenceSettings);
             _settingsManager = new AppSettingsManager();
+
+            // Set initial engine thread limits based on saved settings
+            _inferenceSettings.IntraOpNumThreads = _settingsManager.CurrentSettings.EnableAggressiveCpuMode 
+                ? Math.Max(1, Environment.ProcessorCount - 1) 
+                : 0;
 
             _elapsedTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
             _elapsedTimer.Tick += OnElapsedTimerTick;
@@ -89,6 +93,24 @@ namespace VocalPure.ViewModels
         
         public string DisplayOutputFolder => string.IsNullOrWhiteSpace(CustomOutputFolder) ? "Same as original file" : CustomOutputFolder;
         public bool HasCustomOutputFolder => !string.IsNullOrWhiteSpace(CustomOutputFolder);
+
+        // THE NEW TOGGLE
+        public bool AggressiveCpuMode
+        {
+            get => _settingsManager.CurrentSettings.EnableAggressiveCpuMode;
+            set
+            {
+                if (_settingsManager.CurrentSettings.EnableAggressiveCpuMode != value)
+                {
+                    _settingsManager.CurrentSettings.EnableAggressiveCpuMode = value;
+                    _settingsManager.SaveSettings(); 
+                    OnPropertyChanged();
+                    
+                    // Update engine settings immediately
+                    _inferenceSettings.IntraOpNumThreads = value ? Math.Max(1, Environment.ProcessorCount - 1) : 0;
+                }
+            }
+        }
 
         public bool IsProcessing
         {
@@ -320,8 +342,6 @@ namespace VocalPure.ViewModels
                 _currentCts?.Dispose();
                 _currentCts = null;
 
-                // CRITICAL FIX: Removed GC.Collect() triple-threat to prevent CLR thread blocking
-
                 if (Application.Current?.Dispatcher != null)
                 {
                     await Application.Current.Dispatcher.InvokeAsync(() => ClearCompletedCommand.RaiseCanExecuteChanged());
@@ -351,8 +371,6 @@ namespace VocalPure.ViewModels
                 : CustomOutputFolder;
 
             string baseName = Path.GetFileNameWithoutExtension(job.FileName);
-            
-            // CRITICAL FIX: Match output extension to requested encode format, not original container
             string inputExt = Path.GetExtension(job.InputFilePath).ToLowerInvariant();
             string ext = job.IsVideoOutput ? ".mp4" : (inputExt == ".mp3" ? ".mp3" : ".wav");
             
