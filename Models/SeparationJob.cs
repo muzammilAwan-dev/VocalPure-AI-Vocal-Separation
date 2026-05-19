@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Windows;
 
 namespace VocalPure.Models
@@ -27,6 +28,9 @@ namespace VocalPure.Models
         private string _errorMessage;
         private bool _isVideoOutput;
 
+        // CRITICAL FIX: StringBuilder prevents O(N^2) memory allocation UI locks
+        private readonly StringBuilder _logBuilder;
+
         public SeparationJob(string inputFilePath)
         {
             _id = Guid.NewGuid().ToString("N")[..8];
@@ -38,6 +42,7 @@ namespace VocalPure.Models
             _currentPhaseProgress = 0.0;
             _statusMessage = "Ready";
             _detailedLog = string.Empty;
+            _logBuilder = new StringBuilder();
             _isActive = false;
             _startTime = DateTime.MinValue;
             _elapsed = TimeSpan.Zero;
@@ -47,44 +52,18 @@ namespace VocalPure.Models
             _isVideoOutput = false;
         }
 
-        public string Id
-        {
-            get => _id;
-            private set => SetProperty(ref _id, value);
-        }
-
-        public string InputFilePath
-        {
-            get => _inputFilePath;
-            set => SetProperty(ref _inputFilePath, value);
-        }
-
+        public string Id { get => _id; private set => SetProperty(ref _id, value); }
+        public string InputFilePath { get => _inputFilePath; set => SetProperty(ref _inputFilePath, value); }
+        
         public string? OutputFilePath
         {
             get => _outputFilePath;
-            set
-            {
-                if (SetProperty(ref _outputFilePath, value))
-                {
-                    OnPropertyChanged(nameof(HasOutput));
-                }
-            }
+            set { if (SetProperty(ref _outputFilePath, value)) OnPropertyChanged(nameof(HasOutput)); }
         }
 
         public bool HasOutput => !string.IsNullOrWhiteSpace(OutputFilePath);
-
-        public string FileName
-        {
-            get => _fileName;
-            set => SetProperty(ref _fileName, value);
-        }
-
-        public long FileSize
-        {
-            get => _fileSize;
-            set => SetProperty(ref _fileSize, value);
-        }
-
+        public string FileName { get => _fileName; set => SetProperty(ref _fileName, value); }
+        public long FileSize { get => _fileSize; set => SetProperty(ref _fileSize, value); }
         public string FormattedFileSize => FormatBytes(_fileSize);
 
         public ProcessingPhase Phase
@@ -104,93 +83,36 @@ namespace VocalPure.Models
         public double OverallProgress
         {
             get => _overallProgress;
-            set
-            {
-                if (SetProperty(ref _overallProgress, Math.Clamp(value, 0.0, 1.0)))
-                {
-                    UpdateEstimatedRemaining();
-                }
-            }
+            set { if (SetProperty(ref _overallProgress, Math.Clamp(value, 0.0, 1.0))) UpdateEstimatedRemaining(); }
         }
 
-        public double CurrentPhaseProgress
-        {
-            get => _currentPhaseProgress;
-            set => SetProperty(ref _currentPhaseProgress, Math.Clamp(value, 0.0, 1.0));
-        }
-
-        public string StatusMessage
-        {
-            get => _statusMessage;
-            set => SetProperty(ref _statusMessage, value);
-        }
-
-        public string DetailedLog
-        {
-            get => _detailedLog;
-            set => SetProperty(ref _detailedLog, value);
-        }
-
-        public bool IsActive
-        {
-            get => _isActive;
-            set => SetProperty(ref _isActive, value);
-        }
-
-        public DateTime StartTime
-        {
-            get => _startTime;
-            set => SetProperty(ref _startTime, value);
-        }
-
-        public TimeSpan Elapsed
-        {
-            get => _elapsed;
-            set
-            {
-                if (SetProperty(ref _elapsed, value))
-                {
-                    UpdateEstimatedRemaining();
-                }
-            }
-        }
-
-        public TimeSpan? EstimatedRemaining
-        {
-            get => _estimatedRemaining;
-            private set => SetProperty(ref _estimatedRemaining, value);
-        }
-
-        public string ExecutionProvider
-        {
-            get => _executionProvider;
-            set => SetProperty(ref _executionProvider, value);
-        }
-
-        public string ErrorMessage
-        {
-            get => _errorMessage;
-            set => SetProperty(ref _errorMessage, value);
-        }
-
-        public bool IsVideoOutput
-        {
-            get => _isVideoOutput;
-            set => SetProperty(ref _isVideoOutput, value);
-        }
-
+        public double CurrentPhaseProgress { get => _currentPhaseProgress; set => SetProperty(ref _currentPhaseProgress, Math.Clamp(value, 0.0, 1.0)); }
+        public string StatusMessage { get => _statusMessage; set => SetProperty(ref _statusMessage, value); }
+        
+        public string DetailedLog { get => _detailedLog; set => SetProperty(ref _detailedLog, value); }
+        
+        public bool IsActive { get => _isActive; set => SetProperty(ref _isActive, value); }
+        public DateTime StartTime { get => _startTime; set => SetProperty(ref _startTime, value); }
+        public TimeSpan Elapsed { get => _elapsed; set { if (SetProperty(ref _elapsed, value)) UpdateEstimatedRemaining(); } }
+        public TimeSpan? EstimatedRemaining { get => _estimatedRemaining; private set => SetProperty(ref _estimatedRemaining, value); }
+        public string ExecutionProvider { get => _executionProvider; set => SetProperty(ref _executionProvider, value); }
+        public string ErrorMessage { get => _errorMessage; set => SetProperty(ref _errorMessage, value); }
+        public bool IsVideoOutput { get => _isVideoOutput; set => SetProperty(ref _isVideoOutput, value); }
         public bool IsTerminal => Phase.IsTerminal();
-
         public bool CanCancel => IsActive && !Phase.IsTerminal();
 
         public void AppendLog(string message)
         {
             string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
             
-            // CRITICAL FIX: Changed from Invoke() to InvokeAsync() to prevent UI Thread deadlocks
+            lock (_logBuilder)
+            {
+                _logBuilder.AppendLine($"[{timestamp}] {message}");
+            }
+
             Application.Current?.Dispatcher.InvokeAsync(() =>
             {
-                DetailedLog += $"[{timestamp}] {message}\n";
+                lock (_logBuilder) { DetailedLog = _logBuilder.ToString(); }
             });
         }
 
@@ -202,10 +124,7 @@ namespace VocalPure.Models
                 double remainingSeconds = totalSeconds - Elapsed.TotalSeconds;
                 EstimatedRemaining = TimeSpan.FromSeconds(Math.Max(0, remainingSeconds));
             }
-            else
-            {
-                EstimatedRemaining = null;
-            }
+            else EstimatedRemaining = null;
         }
 
         private static string FormatBytes(long bytes)
@@ -213,33 +132,26 @@ namespace VocalPure.Models
             string[] sizes = { "B", "KB", "MB", "GB" };
             double len = bytes;
             int order = 0;
-            while (len >= 1024 && order < sizes.Length - 1)
-            {
-                order++;
-                len /= 1024;
-            }
+            while (len >= 1024 && order < sizes.Length - 1) { order++; len /= 1024; }
             return $"{len:0.##} {sizes[order]}";
         }
 
         #region INotifyPropertyChanged
         public event PropertyChangedEventHandler? PropertyChanged;
-
         private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string propertyName = "")
         {
-            if (EqualityComparer<T>.Default.Equals(field, value))
-                return false;
-
+            if (EqualityComparer<T>.Default.Equals(field, value)) return false;
             field = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
             return true;
         }
-
-        private void OnPropertyChanged([CallerMemberName] string propertyName = "")
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
+        private void OnPropertyChanged([CallerMemberName] string propertyName = "") => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         #endregion
 
-        public void Dispose() { }
+        // CRITICAL FIX: Properly suppress finalize
+        public void Dispose()
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 }
