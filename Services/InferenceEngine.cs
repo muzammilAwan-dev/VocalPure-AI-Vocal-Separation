@@ -71,9 +71,9 @@ namespace VocalPure.Services
                     {
                         LogSeverityLevel = (OrtLoggingLevel)_settings.LogVerbosityLevel,
                         GraphOptimizationLevel = (GraphOptimizationLevel)_settings.OptimizationLevel,
-                        InterOpNumThreads = Environment.ProcessorCount, // Force all logical cores
-                        IntraOpNumThreads = Environment.ProcessorCount, // Force all logical cores
-                        ExecutionMode = ExecutionMode.ORT_PARALLEL,     // UNLOCK MULTI-CORE PROCESSING
+                        InterOpNumThreads = Environment.ProcessorCount,
+                        IntraOpNumThreads = Environment.ProcessorCount,
+                        ExecutionMode = ExecutionMode.ORT_PARALLEL,
                         EnableCpuMemArena = false,
                         EnableMemoryPattern = false
                     };
@@ -109,7 +109,11 @@ namespace VocalPure.Services
             string outputName = _session.OutputMetadata.Keys.First();
 
             using var chunker = new AudioChunker(_settings.SampleRate, _settings.Channels);
-            long totalSamples = chunker.GetTotalSamples(inputWavPath);
+            
+            // CRITICAL FIX: Instantiate the reader once, keeping the I/O stream persistent
+            using var audioReader = new AudioFileReader(inputWavPath);
+            
+            long totalSamples = chunker.GetTotalSamples(audioReader);
             int totalChunks = chunker.GetChunkCount(totalSamples);
             long remainingSamples = totalSamples; 
 
@@ -119,7 +123,6 @@ namespace VocalPure.Services
 
             using var outputWriter = chunker.CreateStreamWriter(outputVocalsPath);
             
-            // Profiling Stopwatches
             Stopwatch telemetrySw = new Stopwatch();
             Stopwatch realTimeSw = Stopwatch.StartNew();
             using Process currentProcess = Process.GetCurrentProcess();
@@ -129,13 +132,14 @@ namespace VocalPure.Services
                 cancellationToken.ThrowIfCancellationRequested();
                 progress?.Report(((double)i / totalChunks, i + 1, totalChunks, _activeExecutionProvider));
 
-                // Capture baseline hardware stats before the chunk starts
                 TimeSpan startCpuTime = currentProcess.TotalProcessorTime;
                 long startRealTime = realTimeSw.ElapsedMilliseconds;
 
                 // --- PIPELINE EXECUTION ---
                 telemetrySw.Restart();
-                float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(inputWavPath, i), cancellationToken);
+                
+                // Pass the persistent reader down to the chunker to eliminate redundant metadata parsing
+                float[] tensorData = await Task.Run(() => chunker.ReadAndTransformChunk(audioReader, i), cancellationToken);
                 long readTime = telemetrySw.ElapsedMilliseconds;
 
                 telemetrySw.Restart();
@@ -156,11 +160,8 @@ namespace VocalPure.Services
 
                 double cpuUsedMs = (endCpuTime - startCpuTime).TotalMilliseconds;
                 double realPassedMs = endRealTime - startRealTime;
-                
-                // Calculate actual CPU % relative to the number of logical cores available
                 double cpuPercent = (cpuUsedMs / (Environment.ProcessorCount * Math.Max(1, realPassedMs))) * 100;
 
-                // Refresh process data to get the active RAM Working Set
                 currentProcess.Refresh();
                 long ramMb = currentProcess.WorkingSet64 / (1024 * 1024);
 
