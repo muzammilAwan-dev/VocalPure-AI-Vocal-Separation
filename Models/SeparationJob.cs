@@ -66,13 +66,11 @@ namespace VocalPure.Models
             {
                 if (SetProperty(ref _outputFilePath, value))
                 {
-                    // Trigger the UI to evaluate the new HasOutput boolean
                     OnPropertyChanged(nameof(HasOutput));
                 }
             }
         }
 
-        // NEW: This boolean perfectly hooks into the UI Visibility Converter
         public bool HasOutput => !string.IsNullOrWhiteSpace(OutputFilePath);
 
         public string FileName
@@ -188,7 +186,9 @@ namespace VocalPure.Models
         public void AppendLog(string message)
         {
             string timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-            Application.Current?.Dispatcher.Invoke(() =>
+            
+            // CRITICAL FIX: Changed from Invoke() to InvokeAsync() to prevent UI Thread deadlocks
+            Application.Current?.Dispatcher.InvokeAsync(() =>
             {
                 DetailedLog += $"[{timestamp}] {message}\n";
             });
