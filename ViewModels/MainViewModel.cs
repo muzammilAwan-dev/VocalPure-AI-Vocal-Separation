@@ -155,14 +155,22 @@ namespace VocalPure.ViewModels
 
         private async void OnBrowse()
         {
-            var dialog = new OpenFileDialog
+            try
             {
-                Title = "Select Audio or Video File",
-                Filter = "Media Files|*.mp3;*.wav;*.flac;*.aac;*.ogg;*.m4a;*.wma;*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm|All Files|*.*",
-                Multiselect = true
-            };
+                var dialog = new OpenFileDialog
+                {
+                    Title = "Select Audio or Video File",
+                    Filter = "Media Files|*.mp3;*.wav;*.flac;*.aac;*.ogg;*.m4a;*.wma;*.mp4;*.avi;*.mkv;*.mov;*.wmv;*.flv;*.webm|All Files|*.*",
+                    Multiselect = true
+                };
 
-            if (dialog.ShowDialog() == true) await HandleDroppedFilesAsync(dialog.FileNames);
+                if (dialog.ShowDialog() == true) await HandleDroppedFilesAsync(dialog.FileNames);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to browse files");
+                MessageBox.Show($"Error opening file browser: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private void OnChangeOutputFolder()
@@ -188,16 +196,44 @@ namespace VocalPure.ViewModels
 
         private void OnStartProcessing()
         {
-            if (!IsProcessing && JobQueue.Any(j => j.Phase == ProcessingPhase.Idle)) _ = ProcessNextJobAsync();
+            if (!IsProcessing && JobQueue.Any(j => j.Phase == ProcessingPhase.Idle))
+            {
+                IsProcessing = true;
+                _ = RunProcessingLoopAsync();
+            }
         }
 
-        private async Task ProcessNextJobAsync()
+        // CRITICAL FIX: Loop iteration rather than tail-call recursion
+        private async Task RunProcessingLoopAsync()
         {
-            var job = JobQueue.FirstOrDefault(j => j.Phase == ProcessingPhase.Idle);
-            if (job == null) return;
+            try
+            {
+                while (true)
+                {
+                    var job = JobQueue.FirstOrDefault(j => j.Phase == ProcessingPhase.Idle);
+                    if (job == null) break;
 
+                    await ProcessSingleJobAsync(job);
+                }
+            }
+            finally
+            {
+                IsProcessing = false;
+
+                if (Application.Current?.Dispatcher != null)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        StartProcessingCommand.RaiseCanExecuteChanged();
+                        ClearCompletedCommand.RaiseCanExecuteChanged();
+                    });
+                }
+            }
+        }
+
+        private async Task ProcessSingleJobAsync(SeparationJob job)
+        {
             ActiveJob = job;
-            IsProcessing = true;
             _currentCts = new CancellationTokenSource();
             CancellationToken token = _currentCts.Token;
             string tempDir = Path.Combine(Path.GetTempPath(), "VocalPure", job.Id);
@@ -291,19 +327,18 @@ namespace VocalPure.ViewModels
             {
                 _elapsedTimer.Stop();
                 job.IsActive = false;
-                IsProcessing = false;
                 ActiveJob = null;
                 _currentCts?.Dispose();
                 _currentCts = null;
 
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
-
-                ClearCompletedCommand.RaiseCanExecuteChanged();
-                StartProcessingCommand.RaiseCanExecuteChanged();
-
-                if (JobQueue.Any(j => j.Phase == ProcessingPhase.Idle)) await ProcessNextJobAsync();
+                // CRITICAL FIX: Safe UI Thread dispatching for post-job UI refreshes
+                if (Application.Current?.Dispatcher != null)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() =>
+                    {
+                        ClearCompletedCommand.RaiseCanExecuteChanged();
+                    });
+                }
             }
         }
 
