@@ -5,11 +5,6 @@
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <ResourceDictionary>
-            <!-- ============================================================ -->
-            <!-- COLOR PALETTE - High Contrast Dark Theme                     -->
-            <!-- ============================================================ -->
-
-            <!-- Background Colors -->
             <SolidColorBrush x:Key="BackgroundPrimary" Color="#0F0F0F"/>
             <SolidColorBrush x:Key="BackgroundSecondary" Color="#1A1A1A"/>
             <SolidColorBrush x:Key="BackgroundTertiary" Color="#252525"/>
@@ -17,53 +12,42 @@
             <SolidColorBrush x:Key="BackgroundHover" Color="#333333"/>
             <SolidColorBrush x:Key="BackgroundPressed" Color="#3D3D3D"/>
 
-            <!-- Surface Colors -->
             <SolidColorBrush x:Key="SurfacePrimary" Color="#1E1E1E"/>
             <SolidColorBrush x:Key="SurfaceSecondary" Color="#2A2A2A"/>
 
-            <!-- Accent Colors -->
             <SolidColorBrush x:Key="AccentPrimary" Color="#007ACC"/>
             <SolidColorBrush x:Key="AccentSecondary" Color="#0098FF"/>
             <SolidColorBrush x:Key="AccentHover" Color="#1A8CE0"/>
             <SolidColorBrush x:Key="AccentPressed" Color="#005A9E"/>
 
-            <!-- Text Colors -->
             <SolidColorBrush x:Key="TextPrimary" Color="#FFFFFF"/>
             <SolidColorBrush x:Key="TextSecondary" Color="#AAAAAA"/>
             <SolidColorBrush x:Key="TextTertiary" Color="#777777"/>
             <SolidColorBrush x:Key="TextMuted" Color="#555555"/>
             <SolidColorBrush x:Key="TextAccent" Color="#4FC3F7"/>
 
-            <!-- Status Colors -->
             <SolidColorBrush x:Key="SuccessColor" Color="#4CAF50"/>
             <SolidColorBrush x:Key="WarningColor" Color="#FF9800"/>
             <SolidColorBrush x:Key="ErrorColor" Color="#F44336"/>
             <SolidColorBrush x:Key="InfoColor" Color="#2196F3"/>
 
-            <!-- Border Colors -->
             <SolidColorBrush x:Key="BorderPrimary" Color="#333333"/>
             <SolidColorBrush x:Key="BorderAccent" Color="#007ACC"/>
             <SolidColorBrush x:Key="BorderHover" Color="#444444"/>
 
-            <!-- Progress Bar Colors -->
             <SolidColorBrush x:Key="ProgressBackground" Color="#1A1A1A"/>
             <SolidColorBrush x:Key="ProgressForeground" Color="#007ACC"/>
             <SolidColorBrush x:Key="ProgressSecondary" Color="#00BCD4"/>
 
-            <!-- Drop Zone Colors -->
             <SolidColorBrush x:Key="DropZoneBorder" Color="#444444"/>
             <SolidColorBrush x:Key="DropZoneBorderDragOver" Color="#007ACC"/>
             <SolidColorBrush x:Key="DropZoneBackground" Color="#1A1A1A"/>
             <SolidColorBrush x:Key="DropZoneBackgroundDragOver" Color="#142838"/>
 
-            <!-- Scrollbar Colors -->
             <SolidColorBrush x:Key="ScrollBarThumb" Color="#555555"/>
             <SolidColorBrush x:Key="ScrollBarThumbHover" Color="#666666"/>
             <SolidColorBrush x:Key="ScrollBarTrack" Color="#1A1A1A"/>
 
-            <!-- ============================================================ -->
-            <!-- CONVERTERS                                                   -->
-            <!-- ============================================================ -->
             <converters:BooleanToVisibilityConverter x:Key="BoolToVis" />
             <converters:BooleanToVisibilityConverter x:Key="BoolToVisInverted" Invert="True" />
             <converters:InverseBooleanConverter x:Key="InverseBool" />
@@ -71,12 +55,9 @@
             <converters:ProgressToPercentageConverter x:Key="ProgressToPercent" />
             <converters:TimeSpanToStringConverter x:Key="TimeSpanToStr" />
             <converters:PhaseToBrushConverter x:Key="PhaseToBrush" />
+            
+            <converters:NullToVisibilityConverter x:Key="NullToVis" />
 
-            <!-- ============================================================ -->
-            <!-- STYLE DEFINITIONS                                            -->
-            <!-- ============================================================ -->
-
-            <!-- Window Style -->
             <Style x:Key="MainWindowStyle" TargetType="Window">
                 <Setter Property="Background" Value="{StaticResource BackgroundPrimary}"/>
                 <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
@@ -86,7 +67,6 @@
                 <Setter Property="UseLayoutRounding" Value="True"/>
             </Style>
 
-            <!-- TextBlock Styles -->
             <Style x:Key="HeaderText" TargetType="TextBlock">
                 <Setter Property="FontSize" Value="18"/>
                 <Setter Property="FontWeight" Value="SemiBold"/>
@@ -117,7 +97,6 @@
                 <Setter Property="FontFamily" Value="Consolas, Courier New"/>
             </Style>
 
-            <!-- Button Style -->
             <Style x:Key="ActionButton" TargetType="Button">
                 <Setter Property="Background" Value="{StaticResource AccentPrimary}"/>
                 <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
@@ -154,7 +133,6 @@
                 </Setter>
             </Style>
 
-            <!-- Secondary Button -->
             <Style x:Key="SecondaryButton" TargetType="Button" BasedOn="{StaticResource ActionButton}">
                 <Setter Property="Background" Value="{StaticResource BackgroundElevated}"/>
                 <Setter Property="BorderBrush" Value="{StaticResource BorderPrimary}"/>
@@ -162,13 +140,11 @@
                 <Setter Property="FontWeight" Value="Normal"/>
             </Style>
 
-            <!-- Danger Button -->
             <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource ActionButton}">
                 <Setter Property="Background" Value="{StaticResource ErrorColor}"/>
                 <Setter Property="BorderBrush" Value="{StaticResource ErrorColor}"/>
             </Style>
 
-            <!-- ProgressBar Style -->
             <Style x:Key="ModernProgressBar" TargetType="ProgressBar">
                 <Setter Property="Background" Value="{StaticResource ProgressBackground}"/>
                 <Setter Property="Foreground" Value="{StaticResource ProgressForeground}"/>
@@ -209,14 +185,12 @@
                 </Setter>
             </Style>
 
-            <!-- ScrollViewer Style -->
             <Style x:Key="DarkScrollViewer" TargetType="ScrollViewer">
                 <Setter Property="Background" Value="Transparent"/>
                 <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
                 <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/>
             </Style>
 
-            <!-- ListBox Style for Job Queue -->
             <Style x:Key="JobListBox" TargetType="ListBox">
                 <Setter Property="Background" Value="{StaticResource BackgroundSecondary}"/>
                 <Setter Property="BorderBrush" Value="{StaticResource BorderPrimary}"/>
@@ -240,7 +214,6 @@
                 </Setter>
             </Style>
 
-            <!-- ListBoxItem Style -->
             <Style x:Key="JobListItem" TargetType="ListBoxItem">
                 <Setter Property="Background" Value="Transparent"/>
                 <Setter Property="Padding" Value="12,8"/>
@@ -265,7 +238,6 @@
                 </Style.Triggers>
             </Style>
 
-            <!-- TextBox Style (Log Display) -->
             <Style x:Key="LogTextBox" TargetType="TextBox">
                 <Setter Property="Background" Value="{StaticResource BackgroundSecondary}"/>
                 <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
