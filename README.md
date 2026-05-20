@@ -56,7 +56,8 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 
 ```
 
-*(Note: The repository also includes a `VocalPure Setup maker` directory containing Inno Setup scripts. This is only necessary if you are maintaining your own fork and wish to compile your own custom `.exe` installers).*
+*Note: This `VocalPure Setup maker` [GDrive](https://drive.google.com/drive/folders/1XbdVRmkHrcpPm_Bkkq3fUqKlVtf0G4S9?usp=sharing) link containing Inno Setup script and Necessary files to make the Setup.exe
+*
 
 ---
 
